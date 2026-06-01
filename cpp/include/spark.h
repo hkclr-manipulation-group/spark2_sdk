@@ -57,7 +57,6 @@ namespace spark{
             RobotJointStatef getTor() const;
             Pose getEEPose() const;
             Pose getToolPose() const;
-            bool isLatestTargetReceived() const;
 
             // Status
             JointState6b isArmJointEnabled() const;

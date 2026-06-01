@@ -9,7 +9,6 @@ using namespace spark;
 void printFeedback(const Spark& arm, float dt, float timeout, RobotJointStatef* joint_pos=nullptr, Pose* tool_pose=nullptr, std::string prefix_text=""){
     int elapsed_time_ms = 0;
     int dt_ms = static_cast<int>(dt * 1000);
-    bool is_latest_target_received = false;
     bool is_idle = false;
     bool is_interrupted = false;
     SystemStatus sys_status;
@@ -44,15 +43,13 @@ void printFeedback(const Spark& arm, float dt, float timeout, RobotJointStatef* 
         //Print status
         arm.printStatus();
         sys_status = arm.getStatus();
-        is_latest_target_received = arm.isLatestTargetReceived();
         is_idle = sys_status.robot_state == spark::RobotState::kIdle;
         is_interrupted = sys_status.plan_result != spark::PlanResult::kSuccess;
         std::cout <<"---------------------------------------------------------------\n";
-        if (elapsed_time_ms == timeout * 1000 || (is_latest_target_received && is_idle)) break;
+        if (elapsed_time_ms == timeout * 1000 || is_idle) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(dt_ms));
         elapsed_time_ms += dt_ms;
     }
-    std::cout << "is_latest_target_received: " << is_latest_target_received << std::endl;
     std::cout << "is_idle: " << is_idle << std::endl;
     if (is_interrupted) std::cout << "IS INTERRUPTED!!!" << std::endl;
     std::cout <<"===============================================================\n";
@@ -67,42 +64,39 @@ int main(int argc, char *argv[]){
     arm.enableArmJoint({true, true, true, true, true, true});
     std::cout << "Arm started" << std::endl;
 
-    int v = 50;
-    float t = 5;
+    float print_dt = 0.3;
+    float timeout = 50;
     std::string prefix_text = "";
     Pose current_pose;
     RobotJointStatef current_joint_pos;
     
     prefix_text = "==> movePos (10.0, 20.0, 30.0, 40.0, 50.0, 60.0)\n";
-    arm.movePos({10.0, 20.0, 30.0, 40.0, 50.0, 60.0}, 0, t);
-    printFeedback(arm, 0.3, 30, &current_joint_pos, &current_pose, prefix_text);
+    arm.movePos({10.0, 20.0, 30.0, 40.0, 50.0, 60.0}, 0, 5);
+    printFeedback(arm, print_dt, timeout, &current_joint_pos, &current_pose, prefix_text);
 
     //----------------------------move tool in a straight line---------------------------------
     prefix_text = "==> Move Tool Line\n";
     Path<Pose> path1 = {
         {{0.351085, -0.12439, 0.410693}, {0.40558, 0.704416, -0.061629, 0.579228}},
-        {{0.301085, -0.16439, 0.340693}, {0.40558, 0.704416, -0.061629, 0.579228}},
-        {{0.931085, -0.09439, 0.410693}, {0.40558, 0.704416, -0.061629, 0.579228}}
+        {{0.301085, -0.16439, 0.340693}, {0.40558, 0.704416, -0.061629, 0.579228}}
     };
-    Path<int> v1 = {100, 100, 100};
+    Path<int> v1 = {30, 30};
     arm.moveToolLinePath(path1, v1, {});
-    printFeedback(arm, 0.3, 30, &current_joint_pos, &current_pose, prefix_text);
+    printFeedback(arm, print_dt, timeout, &current_joint_pos, &current_pose, prefix_text);
 
     prefix_text = "==> Go Home\n";
-    arm.goHome(0, 5);
-    printFeedback(arm, 0.3, 30, &current_joint_pos, &current_pose, prefix_text);
+    arm.goHome(50, 5);
+    printFeedback(arm, print_dt, timeout, &current_joint_pos, &current_pose, prefix_text);
 
     //--------------------------------move tool from point to point---------------------------
     prefix_text = "==> Move Tool Point\n";
     Path<Pose> path2 = {
         {{0.431085, -0.09439, 0.410693}, {0.40558, 0.704416, -0.061629, 0.579228}},
-        {{0.193, 0.045, 0.777}, {0.707107, 0, 0, 0.707107}},
-        {{0.431085, -0.09439, 0.410693}, {0.40558, 0.704416, -0.061629, 0.579228}}
+        {{0.193, 0.045, 0.777}, {0.707107, 0, 0, 0.707107}}
     };
-    Path<float> t2 = {5.0f, 5.0f, 5.0f};
+    Path<float> t2 = {5, 5};
     arm.moveToolPointPath(path2, {}, t2);
-    printFeedback(arm, 0.3, 30, &current_joint_pos, &current_pose, prefix_text);
-
+    printFeedback(arm, print_dt, timeout, &current_joint_pos, &current_pose, prefix_text);
 
     //--------------------------------move joint from point to point--------------------------------
     prefix_text = "==> Move Joint Pos\n";
@@ -110,9 +104,9 @@ int main(int argc, char *argv[]){
         {-10.0, -20.0, -30.0, -10.0, -10.0, -10.0},
         {0.0, 0.0, 0.0, 0.0, 0.0, 0.0}
     };
-    Path<float> t3 = {5.0f, 5.0f};
+    Path<float> t3 = {10, 10};
     arm.movePosPath(path3, {}, t3);
-    printFeedback(arm, 0.3, 30, &current_joint_pos, &current_pose, prefix_text);
+    printFeedback(arm, print_dt, timeout, &current_joint_pos, &current_pose, prefix_text);
 
     std::cout << "Motion completed" << std::endl;
     arm.stop();

@@ -9,7 +9,6 @@ using namespace spark;
 void printFeedback(const Spark& arm, float dt, float timeout, RobotJointStatef* joint_pos=nullptr, Pose* tool_pose=nullptr, std::string prefix_text=""){
     int elapsed_time_ms = 0;
     int dt_ms = static_cast<int>(dt * 1000);
-    bool is_latest_target_received = false;
     bool is_idle = false;
     bool is_interrupted = false;
     SystemStatus sys_status;
@@ -44,15 +43,13 @@ void printFeedback(const Spark& arm, float dt, float timeout, RobotJointStatef* 
         //Print status
         arm.printStatus();
         sys_status = arm.getStatus();
-        is_latest_target_received = arm.isLatestTargetReceived();
         is_idle = sys_status.robot_state == spark::RobotState::kIdle;
         is_interrupted = sys_status.plan_result != spark::PlanResult::kSuccess;
         std::cout <<"---------------------------------------------------------------\n";
-        if (elapsed_time_ms == timeout * 1000 || (is_latest_target_received && is_idle)) break;
+        if (elapsed_time_ms == timeout * 1000 || is_idle) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(dt_ms));
         elapsed_time_ms += dt_ms;
     }
-    std::cout << "is_latest_target_received: " << is_latest_target_received << std::endl;
     std::cout << "is_idle: " << is_idle << std::endl;
     if (is_interrupted) std::cout << "IS INTERRUPTED!!!" << std::endl;
     std::cout <<"===============================================================\n";
@@ -67,35 +64,37 @@ int main(int argc, char *argv[]){
     arm.enableArmJoint({true, true, true, true, true, true});
     std::cout << "Arm started" << std::endl;
 
-    int v = 0; //From 0 to 100
-    float t = 3; // Override v if t is not 0
+    int v = 30; //From 0 to 100
+    float t = 5;
+    float print_dt = 0.3;
+    float timeout = 50;
     std::string prefix_text = "";
     Pose current_pose;
     RobotJointStatef current_joint_pos;
     
-    //--------------------------------movePos--------------------------------
+    //--------------------move joint from point to point---------------------
     prefix_text = "==> movePos (10.0, 20.0, 30.0, 40.0, 50.0, 60.0)\n";
-    arm.movePos({10.0, 20.0, 30.0, 40.0, 50.0, 60.0}, v, t);
-    printFeedback(arm, 0.3, 15, &current_joint_pos, &current_pose, prefix_text);
+    arm.movePos({10.0, 20.0, 30.0, 40.0, 50.0, 60.0}, v, 0);
+    printFeedback(arm, print_dt, timeout, &current_joint_pos, &current_pose, prefix_text);
 
-    //--------------------------------moveToolPoint--------------------------------
+    //--------------------move tool from point to point----------------------
     prefix_text = "==> moveToolPoint (position: (0.431085, -0.09439, 0.410693), orientation: (0.40558, 0.704416, -0.061629, 0.579228))\n";
-    arm.moveToolPoint({{0.431085, -0.09439, 0.410693}, {0.40558, 0.704416, -0.061629, 0.579228}}, v, t);
-    printFeedback(arm, 0.3, 15, &current_joint_pos, &current_pose, prefix_text);
+    arm.moveToolPoint({{0.431085, -0.09439, 0.410693}, {0.40558, 0.704416, -0.061629, 0.579228}}, v, 0);
+    printFeedback(arm, print_dt, timeout, &current_joint_pos, &current_pose, prefix_text);
 
-    //--------------------------------moveToolLine--------------------------------
+    //--------------------move tool in a straight line-----------------------
     prefix_text = "==> movePos (10.0, 20.0, 30.0, 40.0, 50.0, 60.0)\n";
-    arm.movePos({10.0, 20.0, 30.0, 40.0, 50.0, 60.0}, 30, 0);
-    printFeedback(arm, 0.3, 15, &current_joint_pos, &current_pose, prefix_text);
+    arm.movePos({10.0, 20.0, 30.0, 40.0, 50.0, 60.0}, v, 0);
+    printFeedback(arm, print_dt, timeout, &current_joint_pos, &current_pose, prefix_text);
     
     prefix_text = "==> moveToolLine (position: (0.431085, -0.09439, 0.410693), orientation: (0.40558, 0.704416, -0.061629, 0.579228))\n";
-    arm.moveToolLine({{0.431085, -0.09439, 0.410693}, {0.40558, 0.704416, -0.061629, 0.579228}}, 30, 0);
-    printFeedback(arm, 0.3, 15, &current_joint_pos, &current_pose, prefix_text);
+    arm.moveToolLine({{0.431085, -0.09439, 0.410693}, {0.40558, 0.704416, -0.061629, 0.579228}}, 0, t);
+    printFeedback(arm, print_dt, timeout, &current_joint_pos, &current_pose, prefix_text);
 
     //--------------------------------goHome--------------------------------
     std::cout <<"==> Go to home position (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)" << std::endl;
-    arm.goHome(v, t);
-    printFeedback(arm, 0.3, 15, &current_joint_pos, &current_pose, prefix_text);
+    arm.goHome(20, t); //t would extend if leading joint exceeded v
+    printFeedback(arm, print_dt, timeout, &current_joint_pos, &current_pose, prefix_text);
     
     std::cout << "Motion completed" << std::endl;
     arm.stop();

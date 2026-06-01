@@ -42,6 +42,8 @@ namespace spark{
 
         float receive_dt_us_;
         float send_dt_us_;
+        ControlType initial_target_type_;
+        ControlType initial_actuator_mode_;
         ControlType last_target_type_;
         ControlType last_actuator_mode_;
         MotionControl last_motion_control_;
@@ -71,7 +73,7 @@ namespace spark{
             //Initialize panel_command_
             panel_command_->sequence_id = 0;
             panel_command_->need_setting_update = true;
-            panel_command_->simulation = true;
+            panel_command_->simulation = false;
             panel_command_->motion_type = MotionControl::kJoint;
             panel_command_->connection_state = ConnectionState::kRemote;
             panel_command_->reset_control_mem = false;
@@ -83,8 +85,10 @@ namespace spark{
             panel_command_->InterpolationConstVelTime = config["panel"]["general"]["vel_time"].as<float>();
             panel_command_->NoneInterpolationSaturationRatio = config["panel"]["general"]["none_interpolation_saturation_adjust"].as<float>();
 
-            panel_command_->target_type = stringToEnum<ControlType>(config["panel"]["general"]["target_type"].as<std::string>());
-            panel_command_->actuator_mode = stringToEnum<ControlType>(config["panel"]["general"]["actuator_mode"].as<std::string>());
+            initial_target_type_ = stringToEnum<ControlType>(config["panel"]["general"]["target_type"].as<std::string>());
+            initial_actuator_mode_ = stringToEnum<ControlType>(config["panel"]["general"]["actuator_mode"].as<std::string>());
+            panel_command_->target_type = ControlType::kVelocity;
+            panel_command_->actuator_mode = ControlType::kVelocity;
             last_motion_control_ = panel_command_->motion_type;
             last_target_type_ = panel_command_->target_type;
             last_actuator_mode_ = panel_command_->actuator_mode;
@@ -259,13 +263,14 @@ namespace spark{
                 panel_command_->need_setting_update = true;
             }
 
-
+            
             while (update || panel_command_->need_setting_update || planner_state_->setting_update_finished){
-                update = false;
                 long t0 = get_time_now();
 
                 //Send panel command
                 udpSendOnce();
+
+                update = false;
                 //Check if the setting update is finished
                 float time_diff_sec = (panel_command_->send_timestamp - planner_state_->received_panel_command_timestamp)/1e6;
                 if (planner_state_->setting_update_finished && time_diff_sec < 5*send_dt_us_/1e6){
@@ -288,6 +293,30 @@ namespace spark{
                     sleep_period(send_dt_us_ - (t1 - t0));
                 }
             }
+        }
+
+        void udpSendAndAckTask(bool need_ack=true){
+            //Time in us
+            long t = 0;
+            long dt = 5000; //0.02
+            long resend_timeout = 1000000; // 1sec
+            long exit_timeout = 10000000; // 10 sec
+
+            do {
+                udpSendTask();
+                if (!need_ack) break;
+
+                while (t < resend_timeout){
+                    if (isLatestTargetReceived()) break;
+                    sleep_period(dt);
+                    t += dt;
+                }
+            }while(t < exit_timeout && !isLatestTargetReceived());
+        }
+
+        bool isLatestTargetReceived(){
+            ensureRobotStarted();
+            return planner_state_->received_sequence_id == panel_command_->sequence_id - 1;
         }
 
         void ensureRobotStarted(){
@@ -326,7 +355,20 @@ namespace spark{
         }
 
         void sendPanelCommand(){
-            udpSendTask();
+            udpSendAndAckTask();
+        }
+
+        void switchTargetType(ControlType target_type, ControlType panel_command){
+            panel_command_->target_type = target_type;
+            panel_command_->actuator_mode = panel_command;
+            panel_command_->motion_type = MotionControl::kJoint;
+            panel_command_->arm_target_mode = PanelTargetMode::kSinglePoint;
+
+            //Set initial value 
+            int arm_i = 0;
+            for (int j=0; j<arm_joint_size_[arm_i]; j++){
+                panel_command_->JointCmdDeg[arm_i][j] = (target_type == ControlType::kPosition)? planner_state_->JointPos[arm_i][j] : 0;
+            }
         }
     };
 
@@ -389,10 +431,14 @@ namespace spark{
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
             std::cout << "Successfully connected to Robot." <<std::endl;
+            pimpl_->started_ = true;
 
             //Send the first command
-            pimpl_->udpSendTask();
-            pimpl_->started_ = true;
+            pimpl_->udpSendAndAckTask();
+
+            //Switch back to config's initial mode
+            pimpl_->switchTargetType(pimpl_->initial_target_type_, pimpl_->initial_actuator_mode_);
+            pimpl_->udpSendAndAckTask();
         }catch (const std::exception& e) {
             throw std::runtime_error("Failed to initialize UDP communication: " + std::string(e.what()));
         }
@@ -401,7 +447,7 @@ namespace spark{
     void Spark::stop(){
         if (!pimpl_->started_) return;
         pimpl_->panel_command_->connection_state = ConnectionState::kShutDown;
-        pimpl_->udpSendTask(); 
+        pimpl_->udpSendAndAckTask(); 
         pimpl_->started_ = false;
     }
     
@@ -412,7 +458,7 @@ namespace spark{
             pimpl_->panel_command_->enable_joint[arm_i][joint_i] = arm_state[joint_i];
         }
         pimpl_->panel_command_->need_setting_update = true;
-        pimpl_->udpSendTask(); 
+        pimpl_->udpSendAndAckTask(); 
     }
 
     // Motion Mode
@@ -435,7 +481,7 @@ namespace spark{
                 pimpl_->panel_command_->interpolation_type = InterpolationMethod::kNone;
                 break;
         }
-        pimpl_->udpSendTask(); 
+        pimpl_->udpSendAndAckTask(); 
     }
 
     // Manual Mode
@@ -453,7 +499,7 @@ namespace spark{
             pimpl_->panel_command_->JointCmdDeg[arm_i][j] = arm_pos[j];
         }
 
-        pimpl_->udpSendTask(); 
+        pimpl_->udpSendAndAckTask(); 
     }
 
     void Spark::movePosPath(const Path<JointState6f>& arm_pos, Path<int> v, Path<float> t){
@@ -486,7 +532,7 @@ namespace spark{
             }
         }
 
-        pimpl_->udpSendTask(); 
+        pimpl_->udpSendAndAckTask(); 
     }
 
     void Spark::moveVel(const JointState6f& arm_vel, int a, float t){
@@ -503,7 +549,7 @@ namespace spark{
             pimpl_->panel_command_->JointCmdDeg[arm_i][j] = arm_vel[j];
         }
 
-        pimpl_->udpSendTask(); 
+        pimpl_->udpSendAndAckTask(); 
     }
 
     void Spark::moveEEPoint(const Pose& arm_ee, int v, float t){
@@ -566,7 +612,7 @@ namespace spark{
         pimpl_->panel_command_->TaskCmdDeg[arm_i][4] = target_euler.pitch - current_euler.pitch;
         pimpl_->panel_command_->TaskCmdDeg[arm_i][5] = target_euler.yaw - current_euler.yaw;
         
-        pimpl_->udpSendTask(); 
+        pimpl_->udpSendAndAckTask(); 
     }
 
     void Spark::moveToolPointPath(const Path<Pose>& arm_tool, Path<int> v, Path<float> t){
@@ -607,7 +653,7 @@ namespace spark{
             }
         }
 
-        pimpl_->udpSendTask(); 
+        pimpl_->udpSendAndAckTask(); 
     }
 
     void Spark::moveToolLine(const Pose& arm_tool, int v, float t){
@@ -631,7 +677,7 @@ namespace spark{
         pimpl_->panel_command_->TaskCmdDeg[arm_i][3] = target_euler.roll - current_euler.roll;
         pimpl_->panel_command_->TaskCmdDeg[arm_i][4] = target_euler.pitch - current_euler.pitch;
         pimpl_->panel_command_->TaskCmdDeg[arm_i][5] = target_euler.yaw - current_euler.yaw;
-        pimpl_->udpSendTask(); 
+        pimpl_->udpSendAndAckTask(); 
     }
 
     void Spark::moveToolLinePath(const Path<Pose>& arm_tool, Path<int> v, Path<float> t){
@@ -672,7 +718,7 @@ namespace spark{
             }
         }
 
-        pimpl_->udpSendTask(); 
+        pimpl_->udpSendAndAckTask(); 
     }
 
     void Spark::goHome(int v, float t){
@@ -693,36 +739,23 @@ namespace spark{
                 pimpl_->panel_command_->GripperJointCmd[i][j] = pos[j];
             }
         }
-        pimpl_->udpSendTask(); 
+        pimpl_->udpSendAndAckTask(); 
     }
 
     // Teach Mode
     void Spark::startTeach(){
         pimpl_->ensureRobotStarted();
+        pimpl_->switchTargetType(ControlType::kTorque, ControlType::kTorque);
         pimpl_->panel_command_->control_algorithm = ControlAlgorithm::kGravity;
-        pimpl_->panel_command_->target_type = ControlType::kTorque;
-        pimpl_->panel_command_->actuator_mode = ControlType::kTorque;
-        
-        int arm_i = 0;
-        for (int j=0; j<pimpl_->arm_joint_size_[arm_i]; j++){
-            pimpl_->panel_command_->JointCmdDeg[arm_i][j] = 0;
-        }
         pimpl_->panel_command_->need_setting_update = true;
-        pimpl_->udpSendTask(); 
+        pimpl_->udpSendAndAckTask(); 
     }
 
     void Spark::stopTeach(){
         pimpl_->ensureRobotStarted();
+        pimpl_->switchTargetType(ControlType::kPosition, ControlType::kPosition);
         pimpl_->panel_command_->control_algorithm = ControlAlgorithm::kNone;
-        pimpl_->panel_command_->target_type = ControlType::kPosition;
-        pimpl_->panel_command_->actuator_mode = ControlType::kPosition;
-
-        //Reset the joint command to the current position
-        int arm_i = 0;
-        for (int j=0; j<pimpl_->arm_joint_size_[arm_i]; j++){
-            pimpl_->panel_command_->JointCmdDeg[arm_i][j] = pimpl_->planner_state_->JointPos[arm_i][j];
-        }
-        pimpl_->udpSendTask(); 
+        pimpl_->udpSendAndAckTask(); 
         pimpl_->panel_command_->need_setting_update = true;
     }
 
@@ -841,12 +874,6 @@ namespace spark{
         pose.orientation.z = pimpl_->planner_state_->ToolPose[arm_i][6];
         return pose;
     }
-
-    bool Spark::isLatestTargetReceived() const{
-        pimpl_->ensureRobotStarted();
-        return (pimpl_->planner_state_->received_sequence_id == pimpl_->panel_command_->sequence_id - 1);
-    }
-
 
     // Status
     JointState6b Spark::isArmJointEnabled() const{

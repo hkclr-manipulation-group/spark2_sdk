@@ -7,7 +7,7 @@
 ```text
 lite_arm_sdk/
 |-- CMakeLists.txt
-|-- include
+|-- include/
 |   |-- spark.h          (main SDK class API)
 |   |-- configurator.h   (configuration API)
 |   |-- kinematics.h     (kinematics API)
@@ -47,7 +47,6 @@ lite_arm_sdk/
 | `loadPlayback(filename)` | Load playback trajectory or script file. | playback mode |
 | `getPos(), getVel(), getTor()` | Read current joint position, velocity, and torque. | feedback |
 | `getEEPose(), getToolPose()` | Read current end-effector/tool cartesian pose. | feedback |
-| `isLatestTargetReceived()` | Whether the latest motion target has been received. | feedback |
 | `isArmJointEnabled()` | Read per-joint arm enable state. | status |
 | `getStatus(), printStatus()` | Read or print aggregated runtime status (`SystemStatus`). | status |
 | `getConfigurator(), getKinematics()` | Access specialized subsystems for config/kinematics. | subsystems |

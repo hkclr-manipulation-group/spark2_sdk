@@ -1,6 +1,8 @@
 #ifndef KINEMATICS_IMPL_H
 #define KINEMATICS_IMPL_H
 
+#include <yaml-cpp/yaml.h>
+
 #include "cuarm_robotics/src/robotics/robotics.h"
 
 namespace spark{

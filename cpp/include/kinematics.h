@@ -1,8 +1,9 @@
 #ifndef KINEMATICS_H
 #define KINEMATICS_H
 
+#include <memory>
+
 #include "types.h"
-#include <yaml-cpp/yaml.h>
 
 namespace spark{
     class Kinematics{

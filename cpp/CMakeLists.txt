@@ -94,6 +94,7 @@ add_library(lite_arm_sdk
 
 target_include_directories(lite_arm_sdk PUBLIC
     ${PROJECT_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}/include
     ${GRANDPARENT_DIR}
     ${GRANDPARENT_DIR}/cuarm_rt_control
 )

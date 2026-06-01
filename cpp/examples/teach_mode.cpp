@@ -43,8 +43,8 @@ void printFeedback(const Spark& arm, float dt, float timeout, RobotJointStatef* 
         }
         
         //Print status
-        arm.printStatus();
         sys_status = arm.getStatus();
+        arm.printStatus(sys_status);
         is_idle = sys_status.robot_state == spark::RobotState::kIdle;
         is_interrupted = sys_status.plan_result != spark::PlanResult::kSuccess;
         std::cout <<"---------------------------------------------------------------\n";

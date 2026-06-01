@@ -61,7 +61,7 @@ namespace spark{
             // Status
             JointState6b isArmJointEnabled() const;
             SystemStatus getStatus() const;
-            void printStatus() const;
+            void printStatus(const SystemStatus& status) const;
 
             Configurator& getConfigurator();
             Kinematics& getKinematics();

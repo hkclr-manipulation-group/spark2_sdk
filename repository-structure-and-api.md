@@ -48,7 +48,7 @@ lite_arm_sdk/
 | `getPos(), getVel(), getTor()` | Read current joint position, velocity, and torque. | feedback |
 | `getEEPose(), getToolPose()` | Read current end-effector/tool cartesian pose. | feedback |
 | `isArmJointEnabled()` | Read per-joint arm enable state. | status |
-| `getStatus(), printStatus()` | Read or print aggregated runtime status (`SystemStatus`). | status |
+| `getStatus(), printStatus(status)` | Read or print aggregated runtime status (`SystemStatus`). | status |
 | `getConfigurator(), getKinematics()` | Access specialized subsystems for config/kinematics. | subsystems |
 
 ## Configuration API (`Configurator`)

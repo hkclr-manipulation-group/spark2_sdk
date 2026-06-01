@@ -73,7 +73,7 @@ namespace spark{
             //Initialize panel_command_
             panel_command_->sequence_id = 0;
             panel_command_->need_setting_update = true;
-            panel_command_->simulation = false;
+            panel_command_->simulation = config["rt_control"]["hardware_simulation"].as<bool>();
             panel_command_->motion_type = MotionControl::kJoint;
             panel_command_->connection_state = ConnectionState::kRemote;
             panel_command_->reset_control_mem = false;
@@ -794,9 +794,9 @@ namespace spark{
 
         JointState1f gripper_state{0};
         if (pimpl_->gripper_size_ > 0){
-            int gripper_i_ = 0;
-            for (int i=0; i<pimpl_->gripper_joint_size_[gripper_i_]; i++){
-                gripper_state[i] = pimpl_->planner_state_->GripperJointPos[gripper_i_][i];
+            int gripper_i = 0;
+            for (int i=0; i<pimpl_->gripper_joint_size_[gripper_i]; i++){
+                gripper_state[i] = pimpl_->planner_state_->GripperJointPos[gripper_i][i];
             }
         }
         state.gripper = gripper_state;
@@ -816,9 +816,9 @@ namespace spark{
 
         JointState1f gripper_state{0};
         if (pimpl_->gripper_size_ > 0){
-            int gripper_i_ = 0;
-            for (int i=0; i<pimpl_->gripper_joint_size_[gripper_i_]; i++){
-                gripper_state[i] = pimpl_->planner_state_->GripperJointPos[gripper_i_][i];
+            int gripper_i = 0;
+            for (int i=0; i<pimpl_->gripper_joint_size_[gripper_i]; i++){
+                gripper_state[i] = pimpl_->planner_state_->GripperJointPos[gripper_i][i];
             }
         }
         state.gripper = gripper_state;
@@ -838,9 +838,9 @@ namespace spark{
 
         JointState1f gripper_state{0};
         if (pimpl_->gripper_size_ > 0){
-            int gripper_i_ = 0;
-            for (int i=0; i<pimpl_->gripper_joint_size_[gripper_i_]; i++){
-                gripper_state[i] = pimpl_->planner_state_->GripperJointPos[gripper_i_][i];
+            int gripper_i = 0;
+            for (int i=0; i<pimpl_->gripper_joint_size_[gripper_i]; i++){
+                gripper_state[i] = pimpl_->planner_state_->GripperJointPos[gripper_i][i];
             }
         }
         state.gripper = gripper_state;
@@ -894,6 +894,7 @@ namespace spark{
         for (int j=0; j<pimpl_->arm_joint_size_[arm_i]; j++){
             status.arm_joint_diagnostic_flags[j] = pimpl_->planner_state_->arm_joint_diagnostic_flags[arm_i][j];
         }
+        std::cout <<"\n";
         if (pimpl_->gripper_size_ > 0){
             int gripper_i = 0;
             for (int j=0; j<pimpl_->gripper_joint_size_[gripper_i]; j++){
@@ -903,19 +904,20 @@ namespace spark{
         return status;
     }
 
-    void Spark::printStatus() const{
+    void Spark::printStatus(const SystemStatus& status) const{
         int arm_i = 0;
-        std::cout << "Robot State: " << enumToString(pimpl_->planner_state_->system_state) << std::endl;
-        std::cout << "Plan Result: " << enumToString(pimpl_->planner_state_->plan_result) << std::endl;
+        std::cout << "Robot State: " << enumToString(status.robot_state) << std::endl;
+        std::cout << "Plan Result: " << enumToString(status.plan_result) << std::endl;
         std::cout << "Robot Diagnostic Flags: ";
-        print_diagnostic_flags(pimpl_->planner_state_->system_diagnostic_flags);
+        print_diagnostic_flags(status.robot_diagnostic_flags);
 
+        //Print
         std::cout << "Arm Joint Diagnostic Flags: ";
         bool has_diagnostic_flags = false;
         for (int j=0; j<pimpl_->arm_joint_size_[arm_i]; j++){
-            if (pimpl_->planner_state_->arm_joint_diagnostic_flags[arm_i][j] != DiagnosticFlags::kNone){
+            if (status.arm_joint_diagnostic_flags[j] != DiagnosticFlags::kNone){
                 std::cout << "Joint " << j <<": ";
-                print_diagnostic_flags(pimpl_->planner_state_->arm_joint_diagnostic_flags[arm_i][j]);
+                print_diagnostic_flags(status.arm_joint_diagnostic_flags[j]);
                 has_diagnostic_flags = true;
             }
         }
@@ -923,8 +925,21 @@ namespace spark{
             std::cout << "None\n";
         }
 
+        //Print gripper joint diagnostic flags
         if (pimpl_->gripper_size_ > 0){
-            std::cout << "Gripper Joint Diagnostic Flags: None\n"; //No diagnostic flags for gripper
+            std::cout << "Gripper Joint Diagnostic Flags: ";
+            has_diagnostic_flags = false;
+            int gripper_i = 0;
+            for (int j=0; j<pimpl_->gripper_joint_size_[gripper_i]; j++){
+                if (status.gripper_joint_diagnostic_flags[j] != DiagnosticFlags::kNone){
+                    std::cout << "Joint " << j <<": ";
+                    print_diagnostic_flags(status.gripper_joint_diagnostic_flags[j]);
+                    has_diagnostic_flags = true;
+                }
+            }
+            if (!has_diagnostic_flags){
+                std::cout << "None\n";
+            }
         }
 
     }

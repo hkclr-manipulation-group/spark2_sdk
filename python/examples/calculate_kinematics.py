@@ -4,8 +4,8 @@ from spark2_sdk import Spark2, Pose, Position, Quaternion, JointState6f
 
 def main() -> None:
     config_prefix_path = get_config_prefix_path()
-    arm = Spark2(config_prefix_path)
-    kinematics = arm.get_kinematics()
+    robot = Spark2(config_prefix_path)
+    kinematics = robot.get_kinematics()
 
     joint_pos = JointState6f([10.0, 10.0, 10.0, 0.0, 0.0, 0.0])
     ee_pose = Pose(

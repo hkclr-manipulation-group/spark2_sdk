@@ -4,15 +4,15 @@ from spark2_sdk import Spark2, Position, Pose
 
 def main() -> None:
     config_prefix_path = get_config_prefix_path()
-    arm = Spark2(config_prefix_path)
-    arm.start()
+    robot = Spark2(config_prefix_path)
+    robot.start()
     print("Arm started")
 
-    configurator = arm.get_configurator()
-    kinematics = arm.get_kinematics()
+    configurator = robot.get_configurator()
+    kinematics = robot.get_kinematics()
 
     tool_offset = configurator.get_tool_offset()
-    tool_pose = arm.get_tool_pose()
+    tool_pose = robot.get_tool_pose()
     print("Before set_tool_offset(x, y, z):", tool_offset.x, tool_offset.y, tool_offset.z)
     print("Before Tool pose")
     print("\tposition(x, y, z):", tool_pose.position.x, tool_pose.position.y, tool_pose.position.z)
@@ -27,7 +27,7 @@ def main() -> None:
 
     configurator.set_tool_offset(Position(x=0.01, y=0.02, z=0.03))
     tool_offset1 = configurator.get_tool_offset()
-    tool_pose1 = arm.get_tool_pose()
+    tool_pose1 = robot.get_tool_pose()
 
     print("After set_tool_offset(x, y, z):", tool_offset1.x, tool_offset1.y, tool_offset1.z)
     print("After Tool pose")

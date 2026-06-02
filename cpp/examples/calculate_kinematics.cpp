@@ -8,8 +8,8 @@ using namespace spark2;
 int main(int argc, char *argv[]){ 
     std::string config_prefix_path = CONFIG_PREFIX_PATH;
     std::cout << "Config prefix path: " << config_prefix_path << std::endl;
-    Spark2 arm(config_prefix_path);
-    const Kinematics& kinematics = arm.getKinematics();
+    Spark2 robot(config_prefix_path);
+    const Kinematics& kinematics = robot.getKinematics();
 
     JointState6f joint_pos = {10.0, 10.0, 10.0, 0.0, 0.0, 0.0}; //Initial joint position(Degree)
     Pose ee_pose = {{0.431085, -0.09439, 0.410693}, {0.40558, 0.704416, -0.061629, 0.579228}};

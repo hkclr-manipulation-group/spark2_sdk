@@ -1,14 +1,14 @@
 #include <iostream>
 
-#include "spark.h"
+#include "spark2.h"
 #include "kinematics.h"
 
-using namespace spark;
+using namespace spark2;
 
 int main(int argc, char *argv[]){ 
     std::string config_prefix_path = CONFIG_PREFIX_PATH;
     std::cout << "Config prefix path: " << config_prefix_path << std::endl;
-    Spark arm(config_prefix_path);
+    Spark2 arm(config_prefix_path);
     const Kinematics& kinematics = arm.getKinematics();
 
     JointState6f joint_pos = {10.0, 10.0, 10.0, 0.0, 0.0, 0.0}; //Initial joint position(Degree)

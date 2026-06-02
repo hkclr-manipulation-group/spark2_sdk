@@ -4,7 +4,7 @@
 #include "robot_platform_utils/cpp/include/cuarm_state.h"
 #include "robot_platform_utils/cpp/include/cuarm_tcp.h"
 
-namespace spark{
+namespace spark2{
     struct Configurator::Impl{
         int arm_i_ = 0;
         int gripper_i_ = 0;

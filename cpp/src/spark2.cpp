@@ -1,4 +1,4 @@
-#include "spark.h"
+#include "spark2.h"
 
 #include <algorithm> // Required for std::clamp
 #include <filesystem>
@@ -14,7 +14,7 @@
 #include "configurator_impl.h"
 #include "kinematics_impl.h"
 
-namespace spark{
+namespace spark2{
     
     enum class MotionMode{
         kInitialized = 0,
@@ -23,7 +23,7 @@ namespace spark{
         kPlayback = 3,
     };
 
-    struct Spark::Impl{
+    struct Spark2::Impl{
         std::unique_ptr<Configurator> configurator_;
         std::unique_ptr<Kinematics> kinematics_;
 
@@ -321,7 +321,7 @@ namespace spark{
 
         void ensureRobotStarted(){
             if (!started_){
-                throw std::runtime_error("Spark::ensureRobotStarted failed: robot hasn't been started");
+                throw std::runtime_error("Spark2::ensureRobotStarted failed: robot hasn't been started");
             }
         }
 
@@ -329,7 +329,7 @@ namespace spark{
         void validatePathSize(const std::string& function_name, const Path<T>& arm_pos, const Path<int>& v, const Path<float>& t){
             if (v.size() != arm_pos.size() && t.size() != arm_pos.size()) {
                 throw std::invalid_argument(
-                    "Spark::" + function_name + " failed: Size mismatch. "
+                    "Spark2::" + function_name + " failed: Size mismatch. "
                     "Either velocity path ('v') or time path ('t') must have the same size as position path ('arm_pos'), but got " + 
                     std::to_string(v.size()) + " and " + std::to_string(t.size()) + " for v and " + std::to_string(arm_pos.size()) + " for arm_pos"
                 );
@@ -342,14 +342,14 @@ namespace spark{
 
         PanelCommand& getPanelCommand() {
             if (!panel_command_) {
-                throw std::runtime_error("Spark::getPanelCommand failed: panel_command_ is nullptr");
+                throw std::runtime_error("Spark2::getPanelCommand failed: panel_command_ is nullptr");
             }
             return *panel_command_;
         }
 
         PlannerState& getPlannerState() {
             if (!planner_state_) {
-                throw std::runtime_error("Spark::getPlannerState failed: planner_state_ is nullptr");
+                throw std::runtime_error("Spark2::getPlannerState failed: planner_state_ is nullptr");
             }
             return *planner_state_;
         }
@@ -372,7 +372,7 @@ namespace spark{
         }
     };
 
-    Spark::Spark(std::string config_prefix_path) : pimpl_(std::make_unique<Impl>()){
+    Spark2::Spark2(std::string config_prefix_path) : pimpl_(std::make_unique<Impl>()){
         std::string config_path = config_prefix_path + "/config.yaml";
         YAML::Node config = loadYamlConfig(config_path);
         pimpl_->initialize(config);
@@ -390,7 +390,7 @@ namespace spark{
 
     }
 
-    Spark::~Spark(){
+    Spark2::~Spark2(){
         stop();
 
         pimpl_->shutdown_.store(true);
@@ -409,7 +409,7 @@ namespace spark{
     }
 
     // Connection
-    void Spark::start(){
+    void Spark2::start(){
         //Initialize UDP
         try {
             YAML::Node config = pimpl_->config_;
@@ -444,14 +444,14 @@ namespace spark{
         }
     }
 
-    void Spark::stop(){
+    void Spark2::stop(){
         if (!pimpl_->started_) return;
         pimpl_->panel_command_->connection_state = ConnectionState::kShutDown;
         pimpl_->udpSendAndAckTask(); 
         pimpl_->started_ = false;
     }
     
-    void Spark::enableArmJoint(JointState6b arm_state){
+    void Spark2::enableArmJoint(JointState6b arm_state){
         pimpl_->ensureRobotStarted();
         int arm_i = 0;
         for (int joint_i=0; joint_i<pimpl_->arm_joint_size_[arm_i]; joint_i++){
@@ -462,7 +462,7 @@ namespace spark{
     }
 
     // Motion Mode
-    void Spark::setArmSmoothingMethod(SmoothingMethod method){
+    void Spark2::setArmSmoothingMethod(SmoothingMethod method){
         pimpl_->ensureRobotStarted();
         switch (method){
             case SmoothingMethod::kLinear:
@@ -485,7 +485,7 @@ namespace spark{
     }
 
     // Manual Mode
-    void Spark::movePos(const JointState6f& arm_pos, int v, float t){
+    void Spark2::movePos(const JointState6f& arm_pos, int v, float t){
         pimpl_->ensureRobotStarted();
         pimpl_->panel_command_->motion_type = MotionControl::kJoint;
         pimpl_->panel_command_->arm_target_mode = PanelTargetMode::kSinglePoint;
@@ -502,7 +502,7 @@ namespace spark{
         pimpl_->udpSendAndAckTask(); 
     }
 
-    void Spark::movePosPath(const Path<JointState6f>& arm_pos, Path<int> v, Path<float> t){
+    void Spark2::movePosPath(const Path<JointState6f>& arm_pos, Path<int> v, Path<float> t){
         pimpl_->ensureRobotStarted();
         pimpl_->validatePathSize("movePosPath", arm_pos, v, t);
 
@@ -535,7 +535,7 @@ namespace spark{
         pimpl_->udpSendAndAckTask(); 
     }
 
-    void Spark::moveVel(const JointState6f& arm_vel, int a, float t){
+    void Spark2::moveVel(const JointState6f& arm_vel, int a, float t){
         pimpl_->ensureRobotStarted();
         pimpl_->panel_command_->motion_type = MotionControl::kJoint;
         pimpl_->panel_command_->arm_target_mode = PanelTargetMode::kSinglePoint;
@@ -552,14 +552,14 @@ namespace spark{
         pimpl_->udpSendAndAckTask(); 
     }
 
-    void Spark::moveEEPoint(const Pose& arm_ee, int v, float t){
+    void Spark2::moveEEPoint(const Pose& arm_ee, int v, float t){
         pimpl_->ensureRobotStarted();
         Position tool_offset = pimpl_->configurator_->getToolOffset();
         Pose tool_pose = pimpl_->kinematics_->eeToToolPose(arm_ee, tool_offset);
         moveToolPoint(tool_pose, v, t);
     }
 
-    void Spark::moveEEPointPath(const Path<Pose>& arm_ee, Path<int> v, Path<float> t){
+    void Spark2::moveEEPointPath(const Path<Pose>& arm_ee, Path<int> v, Path<float> t){
         pimpl_->ensureRobotStarted();
         pimpl_->validatePathSize("moveEEPointPath", arm_ee, v, t);
 
@@ -571,14 +571,14 @@ namespace spark{
         moveToolPointPath(tool_pose, v, t);
     }
 
-    void Spark::moveEELine(const Pose& arm_ee, int v, float t){
+    void Spark2::moveEELine(const Pose& arm_ee, int v, float t){
         pimpl_->ensureRobotStarted();
         Position tool_offset = pimpl_->configurator_->getToolOffset();
         Pose tool_pose = pimpl_->kinematics_->eeToToolPose(arm_ee, tool_offset);
         moveToolLine(tool_pose, v, t);
     }
 
-    void Spark::moveEELinePath(const Path<Pose>& arm_ee, Path<int> v, Path<float> t){
+    void Spark2::moveEELinePath(const Path<Pose>& arm_ee, Path<int> v, Path<float> t){
         pimpl_->ensureRobotStarted();
         pimpl_->validatePathSize("moveEELinePath", arm_ee, v, t);
 
@@ -590,7 +590,7 @@ namespace spark{
         moveToolLinePath(tool_pose, v, t);
     }
 
-    void Spark::moveToolPoint(const Pose& arm_tool, int v, float t){
+    void Spark2::moveToolPoint(const Pose& arm_tool, int v, float t){
         pimpl_->ensureRobotStarted();
         pimpl_->panel_command_->motion_type = MotionControl::kTask;
         pimpl_->panel_command_->task_orien_type = OrientControl::kEnd;
@@ -615,7 +615,7 @@ namespace spark{
         pimpl_->udpSendAndAckTask(); 
     }
 
-    void Spark::moveToolPointPath(const Path<Pose>& arm_tool, Path<int> v, Path<float> t){
+    void Spark2::moveToolPointPath(const Path<Pose>& arm_tool, Path<int> v, Path<float> t){
         pimpl_->ensureRobotStarted();
         pimpl_->validatePathSize("moveToolPointPath", arm_tool, v, t);
 
@@ -656,7 +656,7 @@ namespace spark{
         pimpl_->udpSendAndAckTask(); 
     }
 
-    void Spark::moveToolLine(const Pose& arm_tool, int v, float t){
+    void Spark2::moveToolLine(const Pose& arm_tool, int v, float t){
         pimpl_->ensureRobotStarted();
         pimpl_->panel_command_->motion_type = MotionControl::kTaskLine;
         pimpl_->panel_command_->task_orien_type = OrientControl::kEnd;
@@ -680,7 +680,7 @@ namespace spark{
         pimpl_->udpSendAndAckTask(); 
     }
 
-    void Spark::moveToolLinePath(const Path<Pose>& arm_tool, Path<int> v, Path<float> t){
+    void Spark2::moveToolLinePath(const Path<Pose>& arm_tool, Path<int> v, Path<float> t){
         pimpl_->ensureRobotStarted();
         pimpl_->validatePathSize("moveToolLinePath", arm_tool, v, t);
 
@@ -721,7 +721,7 @@ namespace spark{
         pimpl_->udpSendAndAckTask(); 
     }
 
-    void Spark::goHome(int v, float t){
+    void Spark2::goHome(int v, float t){
         pimpl_->ensureRobotStarted();
         JointState6f home_pos;
         
@@ -732,7 +732,7 @@ namespace spark{
         movePos(home_pos, v, t);
     }
 
-    void Spark::moveGripperPos(const JointState1f& pos, int v, float t){
+    void Spark2::moveGripperPos(const JointState1f& pos, int v, float t){
         pimpl_->ensureRobotStarted();
         for (int i=0; i<pimpl_->gripper_size_; i++){
             for (int j=0; j<pimpl_->gripper_joint_size_[i]; j++){
@@ -743,7 +743,7 @@ namespace spark{
     }
 
     // Teach Mode
-    void Spark::startTeach(){
+    void Spark2::startTeach(){
         pimpl_->ensureRobotStarted();
         pimpl_->switchTargetType(ControlType::kTorque, ControlType::kTorque);
         pimpl_->panel_command_->control_algorithm = ControlAlgorithm::kGravity;
@@ -751,7 +751,7 @@ namespace spark{
         pimpl_->udpSendAndAckTask(); 
     }
 
-    void Spark::stopTeach(){
+    void Spark2::stopTeach(){
         pimpl_->ensureRobotStarted();
         pimpl_->switchTargetType(ControlType::kPosition, ControlType::kPosition);
         pimpl_->panel_command_->control_algorithm = ControlAlgorithm::kNone;
@@ -760,28 +760,28 @@ namespace spark{
     }
 
     // Playback Mode
-    void Spark::startPlayback(){
+    void Spark2::startPlayback(){
         pimpl_->ensureRobotStarted();
         std::cout << "startPlayback() haven't been implemented" << std::endl;
     }
 
-    void Spark::stopPlayback(){
+    void Spark2::stopPlayback(){
         pimpl_->ensureRobotStarted();
         std::cout << "stopPlayback() haven't been implemented" << std::endl;
     }
 
-    void Spark::resetPlayback(){
+    void Spark2::resetPlayback(){
         pimpl_->ensureRobotStarted();
         std::cout << "resetPlayback() haven't been implemented" << std::endl;
     }
 
-    void Spark::loadPlayback(const std::string& filename){
+    void Spark2::loadPlayback(const std::string& filename){
         pimpl_->ensureRobotStarted();
         std::cout << "loadPlayback() haven't been implemented" << std::endl;
     }
 
     // Feedback
-    RobotJointStatef Spark::getPos() const{
+    RobotJointStatef Spark2::getPos() const{
         pimpl_->ensureRobotStarted();
         int arm_i = 0;
         RobotJointStatef state;
@@ -803,7 +803,7 @@ namespace spark{
         return state;
     }
 
-    RobotJointStatef Spark::getVel() const{
+    RobotJointStatef Spark2::getVel() const{
         pimpl_->ensureRobotStarted();
         int arm_i = 0;
         RobotJointStatef state;
@@ -825,7 +825,7 @@ namespace spark{
         return state;
     }
 
-    RobotJointStatef Spark::getTor() const{
+    RobotJointStatef Spark2::getTor() const{
         pimpl_->ensureRobotStarted();
         int arm_i = 0;
         RobotJointStatef state;
@@ -847,7 +847,7 @@ namespace spark{
         return state;
     }
 
-    Pose Spark::getEEPose() const{
+    Pose Spark2::getEEPose() const{
         pimpl_->ensureRobotStarted();
         int arm_i = 0;
         Pose pose;
@@ -861,7 +861,7 @@ namespace spark{
         return pose;
     }
 
-    Pose Spark::getToolPose() const{
+    Pose Spark2::getToolPose() const{
         pimpl_->ensureRobotStarted();
         int arm_i = 0;
         Pose pose;
@@ -876,7 +876,7 @@ namespace spark{
     }
 
     // Status
-    JointState6b Spark::isArmJointEnabled() const{
+    JointState6b Spark2::isArmJointEnabled() const{
         JointState6b enabled;
         int arm_i = 0;
         for (int j=0; j<pimpl_->arm_joint_size_[arm_i]; j++){
@@ -885,11 +885,11 @@ namespace spark{
         return enabled;
     }
     
-    SystemStatus Spark::getStatus() const{
+    SystemStatus Spark2::getStatus() const{
         SystemStatus status;
         int arm_i = 0;
-        status.robot_state =  static_cast<spark::RobotState>(pimpl_->planner_state_->system_state);
-        status.plan_result = static_cast<spark::PlanResult>(pimpl_->planner_state_->plan_result);
+        status.robot_state =  static_cast<spark2::RobotState>(pimpl_->planner_state_->system_state);
+        status.plan_result = static_cast<spark2::PlanResult>(pimpl_->planner_state_->plan_result);
         status.robot_diagnostic_flags = pimpl_->planner_state_->system_diagnostic_flags;
         for (int j=0; j<pimpl_->arm_joint_size_[arm_i]; j++){
             status.arm_joint_diagnostic_flags[j] = pimpl_->planner_state_->arm_joint_diagnostic_flags[arm_i][j];
@@ -898,13 +898,13 @@ namespace spark{
         if (pimpl_->gripper_size_ > 0){
             int gripper_i = 0;
             for (int j=0; j<pimpl_->gripper_joint_size_[gripper_i]; j++){
-                status.gripper_joint_diagnostic_flags[j] = spark::DiagnosticFlags::kNone;
+                status.gripper_joint_diagnostic_flags[j] = spark2::DiagnosticFlags::kNone;
             }
         }
         return status;
     }
 
-    void Spark::printStatus(const SystemStatus& status) const{
+    void Spark2::printStatus(const SystemStatus& status) const{
         int arm_i = 0;
         std::cout << "Robot State: " << enumToString(status.robot_state) << std::endl;
         std::cout << "Plan Result: " << enumToString(status.plan_result) << std::endl;
@@ -944,11 +944,11 @@ namespace spark{
 
     }
 
-    Configurator& Spark::getConfigurator(){
+    Configurator& Spark2::getConfigurator(){
         return *pimpl_->configurator_;
     }
 
-    Kinematics& Spark::getKinematics(){
+    Kinematics& Spark2::getKinematics(){
         return *pimpl_->kinematics_;
     }
 

@@ -6,7 +6,7 @@
 
 #include "types.h"
 
-namespace spark{
+namespace spark2{
     class Configurator{
         public:
             ~Configurator();
@@ -40,7 +40,7 @@ namespace spark{
             Configurator();
             struct Impl;
             std::unique_ptr<Impl> pimpl_;
-            friend class Spark;
+            friend class Spark2;
     };
 }
 

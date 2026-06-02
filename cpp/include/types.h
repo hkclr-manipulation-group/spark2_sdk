@@ -6,7 +6,7 @@
 #include <numbers>
 #include <cstdint>
 
-namespace spark{
+namespace spark2{
     constexpr float kPi = std::numbers::pi_v<float>;
     constexpr float kDegToRad = kPi / 180.0f;
     constexpr float kRadToDeg = 180.0f / kPi;

@@ -1,12 +1,12 @@
-#include "spark.h"
+#include "spark2.h"
 
 #include <iostream>
 #include <thread>
 #include <chrono>
 
-using namespace spark;
+using namespace spark2;
 
-void printFeedback(const Spark& arm, float dt, float timeout, RobotJointStatef* joint_pos=nullptr, Pose* tool_pose=nullptr, std::string prefix_text=""){
+void printFeedback(const Spark2& arm, float dt, float timeout, RobotJointStatef* joint_pos=nullptr, Pose* tool_pose=nullptr, std::string prefix_text=""){
     int elapsed_time_ms = 0;
     int dt_ms = static_cast<int>(dt * 1000);
     bool is_idle = false;
@@ -43,8 +43,8 @@ void printFeedback(const Spark& arm, float dt, float timeout, RobotJointStatef* 
         //Print status
         sys_status = arm.getStatus();
         arm.printStatus(sys_status);
-        is_idle = sys_status.robot_state == spark::RobotState::kIdle;
-        is_interrupted = sys_status.plan_result != spark::PlanResult::kSuccess;
+        is_idle = sys_status.robot_state == spark2::RobotState::kIdle;
+        is_interrupted = sys_status.plan_result != spark2::PlanResult::kSuccess;
         std::cout <<"---------------------------------------------------------------\n";
         if (elapsed_time_ms == timeout * 1000 || is_idle) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(dt_ms));
@@ -59,7 +59,7 @@ void printFeedback(const Spark& arm, float dt, float timeout, RobotJointStatef* 
 int main(int argc, char *argv[]){ 
     std::string config_prefix_path = CONFIG_PREFIX_PATH;
     std::cout << "Config prefix path: " << config_prefix_path << std::endl;
-    Spark arm(config_prefix_path);
+    Spark2 arm(config_prefix_path);
     arm.start();
     arm.enableArmJoint({true, true, true, true, true, true});
     std::cout << "Arm started" << std::endl;

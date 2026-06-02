@@ -5,7 +5,7 @@
 
 #include "cuarm_robotics/src/robotics/robotics.h"
 
-namespace spark{
+namespace spark2{
     struct Kinematics::Impl{
         Robotics* robotics_;
         int arm_i_ = 0;

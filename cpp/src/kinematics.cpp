@@ -10,7 +10,7 @@ namespace Eigen {
     using Vector7d = Matrix<double, 7, 1>;
 }
 
-namespace spark{
+namespace spark2{
     Eigen::Map<const Eigen::Vector3f> toEigen(const Position& p) {
         return Eigen::Map<const Eigen::Vector3f>(&p.x);
     }

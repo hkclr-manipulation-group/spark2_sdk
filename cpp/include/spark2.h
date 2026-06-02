@@ -1,5 +1,5 @@
-#ifndef LITEARM_H
-#define LITEARM_H
+#ifndef SPARK2_H
+#define SPARK2_H
 
 #include <vector>
 #include <string>
@@ -8,11 +8,11 @@
 #include "kinematics.h"
 #include "configurator.h"
 
-namespace spark{
-    class Spark{
+namespace spark2{
+    class Spark2{
         public:
-            Spark(std::string config_prefix_path = "");
-            ~Spark();
+            Spark2(std::string config_prefix_path = "");
+            ~Spark2();
 
             // Connection
             void start();

@@ -1,14 +1,14 @@
-# Lite Arm SDK: Repository Structure and API
+# Spark2 SDK: Repository Structure and API
 
 - Language: C++20
 
 ## Repository Structure
 
 ```text
-lite_arm_sdk/
+spark2_sdk/
 |-- CMakeLists.txt
 |-- include/
-|   |-- spark.h          (main SDK class API)
+|   |-- spark2.h          (main SDK class API)
 |   |-- configurator.h   (configuration API)
 |   |-- kinematics.h     (kinematics API)
 |   `-- types.h          (shared data types/enums)
@@ -21,11 +21,11 @@ lite_arm_sdk/
 |   `-- calculate_kinematics.cpp
 ```
 
-## Core SDK API (`Spark`)
+## Core SDK API (`Spark2`)
 
 | API | Description | Group |
 |---|---|---|
-| `Spark(config_prefix_path="")` | Create SDK client; optional path prefix for configuration files. | constructor |
+| `Spark2(config_prefix_path="")` | Create SDK client; optional path prefix for configuration files. | constructor |
 | `start(), stop()` | Start or stop arm runtime session. | connection |
 | `enableArmJoint(arm_state)` | Enable arm joints by 6-element boolean state array. | connection |
 | `setArmSmoothingMethod(method)` | Select smoothing strategy for single-target arm motion. | motion mode |

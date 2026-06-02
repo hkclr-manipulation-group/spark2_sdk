@@ -8,7 +8,7 @@
 #include "robot_platform_utils/cpp/include/cuarm_message_handler.h"
 #include "robot_platform_utils/cpp/include/cuarm_state.h"
 
-namespace spark{
+namespace spark2{
 //--------------------------------- Configurator::Impl ---------------------------------
     void Configurator::Impl::registerCallback(
         std::function<PanelCommand&()> getPanelCommand, 

@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spark2_sdk"
+version = "1.0.0"
+description = "Production Python API for Spark2 SDK"
+requires-python = ">=3.8"
+
+[tool.setuptools]
+# Tell Python where your source package lives
+packages = ["spark2_sdk"]
+
+[tool.setuptools.package-data]
+# Crucial: Force Python to include the pre-built binary inside the package
+spark2_sdk = ["lib/x86/*.so", "lib/arm64/*.so"]

@@ -5,7 +5,7 @@
 
 #include "types.h"
 
-namespace spark{
+namespace spark2{
     class Kinematics{
         public:
             ~Kinematics();
@@ -20,7 +20,7 @@ namespace spark{
             Kinematics();
             struct Impl;
             std::unique_ptr<Impl> pimpl_;
-            friend class Spark;
+            friend class Spark2;
     };
 }
 #endif 

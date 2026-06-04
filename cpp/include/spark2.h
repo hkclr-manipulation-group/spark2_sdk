@@ -41,15 +41,12 @@ namespace spark2{
             void goHome(int v=50, float t=0);
             void moveGripperPos(const JointState1f& pos, int v=50, float t=0);
 
-            // Teach Mode
+            // Teach & Replayback Mode
             void startTeach();
             void stopTeach();
-
-            // Playback Mode
             void startPlayback();
             void stopPlayback();
             void resetPlayback();
-            void loadPlayback(const std::string& filename);
 
             // Feedback
             RobotJointStatef getPos() const;

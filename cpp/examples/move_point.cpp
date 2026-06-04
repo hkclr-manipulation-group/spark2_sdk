@@ -92,7 +92,7 @@ int main(int argc, char *argv[]){
     printFeedback(robot, print_dt, timeout, &current_joint_pos, &current_pose, prefix_text);
 
     //--------------------------------goHome--------------------------------
-    std::cout <<"==> Go to home position (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)" << std::endl;
+    prefix_text = "==> Go to home position (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)\n";
     robot.goHome(20, t); //t would extend if leading joint exceeded v
     printFeedback(robot, print_dt, timeout, &current_joint_pos, &current_pose, prefix_text);
     

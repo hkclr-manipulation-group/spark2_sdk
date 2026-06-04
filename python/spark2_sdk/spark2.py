@@ -95,9 +95,6 @@ class Spark2:
     def reset_playback(self) -> None:
         self._internal.reset_playback()
 
-    def load_playback(self, filename: str) -> None:
-        self._internal.load_playback(filename)
-
     # --- Feedback ---
     def get_pos(self) -> RobotJointStatef:
         pos = self._internal.get_pos()

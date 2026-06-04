@@ -87,16 +87,27 @@ int main(int argc, char *argv[]){
     //-------------------------Start Teach---------------------------------
     prefix_text = "==> You can freely move the robot robot to any pose.\n";
     robot.startTeach();
-    std::cout <<"Press any key to stop...";
-    getch();
-    std::cout <<"Key pressed. Hand off the robot now.\n";
-    std::this_thread::sleep_for(std::chrono::milliseconds(500)); //Hand off reaction time
 
     //-------------------------Stop Teach----------------------------------
-    std::cout <<"Stop teach mode and go home.\n";
+    std::cout <<"Press any key to stop teach...";
+    getch();
     robot.stopTeach();
+    std::cout <<"Teach mode stopped.\n";
+
+    //----------------------------Start Playback---------------------------
+    std::cout <<"Press any key to start playback...";
+    getch();
+    robot.startPlayback();
     
-    //----------------------------Go Home----------------------------------
+    //----------------------------Start Playback---------------------------
+    std::cout <<"Press any key to move to first point of playback...";
+    getch();
+    robot.resetPlayback();
+    std::cout <<"Playback reset.\n";
+
+    // //----------------------------Go Home-------------------------------
+    std::cout <<"Press any key to go home...";
+    getch();
     prefix_text = "==> Go home.\n";
     robot.goHome();
     printFeedback(robot, print_dt, timeout, &current_joint_pos, nullptr, prefix_text);

@@ -50,6 +50,8 @@ namespace spark2{
         std::vector<RobotJointStatef> playback_;
         std::mutex panel_command_mutex_;
 
+        const ControlType kActuatorModeForPositionTarget = ControlType::kPosition;
+
         void initialize(const YAML::Node& config){
             //Initialize class variables
             panel_command_ = std::make_unique<PanelCommand>();
@@ -254,64 +256,50 @@ namespace spark2{
             }
             udp_->send(panel_command_.get());
             panel_command_->sequence_id++;
+            last_motion_control_ = (MotionControl)panel_command_->motion_type; 
+            last_target_type_ = panel_command_->target_type;
+            last_actuator_mode_ = panel_command_->actuator_mode;
         }
 
-        void udpSendTask(){
+        void udpSendAndAckTask(){
+            //Time in us
+            long t = 0;
+            long dt = receive_dt_us_*2;
+            long resend_timeout = 1000000; // 1sec
+            long exit_timeout = 5000000; // 10 sec
+            bool need_send = true;
+
             std::lock_guard<std::mutex> lock(panel_command_mutex_);
-            bool update = true;
-            if (last_actuator_mode_ != panel_command_->actuator_mode){
+            if (last_actuator_mode_ != panel_command_->actuator_mode || panel_command_->reset_interpolation || panel_command_->reset_control_mem){
                 panel_command_->need_setting_update = true;
             }
 
-            
-            while (update || panel_command_->need_setting_update || planner_state_->setting_update_finished){
-                long t0 = get_time_now();
-
-                //Send panel command
+            while (t < exit_timeout && need_send){
                 udpSendOnce();
 
-                update = false;
-                //Check if the setting update is finished
-                float time_diff_sec = (panel_command_->send_timestamp - planner_state_->received_panel_command_timestamp)/1e6;
-                if (planner_state_->setting_update_finished && time_diff_sec < 5*send_dt_us_/1e6){
-                    panel_command_->need_setting_update = false;
-                }
-
-                if (panel_command_->reset_interpolation || panel_command_->reset_control_mem){ //Force to send the panel command again
-                    panel_command_->reset_interpolation = false; //Allow accumulatedly set() by Arm/Motor control
-                    panel_command_->reset_control_mem = false; //Reset task/null saved pose for arm
-                    update = true;
-                }
-
-                last_motion_control_ = (MotionControl)panel_command_->motion_type; 
-                last_target_type_ = panel_command_->target_type;
-                last_actuator_mode_ = panel_command_->actuator_mode;
-                
-                //Sleep to maintain the sending rate
-                long t1 = get_time_now();
-                if (t1 - t0 < send_dt_us_){
-                    sleep_period(send_dt_us_ - (t1 - t0));
-                }
-            }
-        }
-
-        void udpSendAndAckTask(bool need_ack=true){
-            //Time in us
-            long t = 0;
-            long dt = 5000; //0.02
-            long resend_timeout = 1000000; // 1sec
-            long exit_timeout = 10000000; // 10 sec
-
-            do {
-                udpSendTask();
-                if (!need_ack) break;
-
-                while (t < resend_timeout){
-                    if (isLatestTargetReceived()) break;
+                long t1 = 0;
+                while (t1 < resend_timeout){
+                    if (panel_command_->need_setting_update){
+                        if (isLatestTargetReceived()){
+                            panel_command_->need_setting_update = false;
+                            panel_command_->reset_interpolation = false;
+                            panel_command_->reset_control_mem = false; //Reset task/null saved pose for arm
+                            break;
+                        }
+                    }else if (planner_state_->setting_update_finished && isLatestTargetReceived()){
+                        need_send = false;
+                        break;
+                    }
                     sleep_period(dt);
-                    t += dt;
+                    t1 += dt;
                 }
-            }while(t < exit_timeout && !isLatestTargetReceived());
+                t += t1;
+            }
+
+            if (t >= exit_timeout){
+                throw std::runtime_error("Spark2::udpSendAndAckTask failed: No ACK received after " 
+                    + std::to_string(exit_timeout/1000000.0) + " seconds\n");
+            }
         }
 
         bool isLatestTargetReceived(){
@@ -361,8 +349,6 @@ namespace spark2{
         void switchTargetType(ControlType target_type, ControlType panel_command){
             panel_command_->target_type = target_type;
             panel_command_->actuator_mode = panel_command;
-            panel_command_->motion_type = MotionControl::kJoint;
-            panel_command_->arm_target_mode = PanelTargetMode::kSinglePoint;
 
             //Set initial value 
             int arm_i = 0;
@@ -430,18 +416,20 @@ namespace spark2{
             while (!pimpl_->first_state_received_.load()){
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
-            std::cout << "Successfully connected to Robot." <<std::endl;
             pimpl_->started_ = true;
 
-            //Send the first command
+            //Send the first command of 0 velocity
+            long t0 = get_time_now();
             pimpl_->udpSendAndAckTask();
 
             //Switch back to config's initial mode
+            long t1 = get_time_now();
             pimpl_->switchTargetType(pimpl_->initial_target_type_, pimpl_->initial_actuator_mode_);
             pimpl_->udpSendAndAckTask();
         }catch (const std::exception& e) {
             throw std::runtime_error("Failed to initialize UDP communication: " + std::string(e.what()));
         }
+        std::cout << "Successfully connected to Robot." <<std::endl;
     }
 
     void Spark2::stop(){
@@ -489,8 +477,7 @@ namespace spark2{
         pimpl_->ensureRobotStarted();
         pimpl_->panel_command_->motion_type = MotionControl::kJoint;
         pimpl_->panel_command_->arm_target_mode = PanelTargetMode::kSinglePoint;
-        pimpl_->panel_command_->target_type = ControlType::kPosition;
-        pimpl_->panel_command_->actuator_mode = ControlType::kPosition;
+        pimpl_->switchTargetType(ControlType::kPosition, pimpl_->kActuatorModeForPositionTarget);
         pimpl_->panel_command_->InterpolationAccTime = t;
         pimpl_->panel_command_->interpolation_speed_ratio = std::clamp(v / 100.0f, 0.0f, 1.0f);
         
@@ -508,8 +495,7 @@ namespace spark2{
 
         pimpl_->panel_command_->motion_type = MotionControl::kJoint;
         pimpl_->panel_command_->arm_target_mode = PanelTargetMode::kWaypoint;
-        pimpl_->panel_command_->target_type = ControlType::kPosition;
-        pimpl_->panel_command_->actuator_mode = ControlType::kPosition;
+        pimpl_->switchTargetType(ControlType::kPosition, pimpl_->kActuatorModeForPositionTarget);
         pimpl_->panel_command_->reset_interpolation = true;
 
         int arm_i = 0;
@@ -595,8 +581,7 @@ namespace spark2{
         pimpl_->panel_command_->motion_type = MotionControl::kTask;
         pimpl_->panel_command_->task_orien_type = OrientControl::kEnd;
         pimpl_->panel_command_->arm_target_mode = PanelTargetMode::kSinglePoint;
-        pimpl_->panel_command_->target_type = ControlType::kPosition;
-        pimpl_->panel_command_->actuator_mode = ControlType::kPosition;
+        pimpl_->switchTargetType(ControlType::kPosition, pimpl_->kActuatorModeForPositionTarget);
         pimpl_->panel_command_->reset_control_mem = true;
         pimpl_->panel_command_->InterpolationAccTime = t;
         pimpl_->panel_command_->interpolation_speed_ratio = std::clamp(v / 100.0f, 0.0f, 1.0f);
@@ -622,8 +607,7 @@ namespace spark2{
         pimpl_->panel_command_->motion_type = MotionControl::kTask;
         pimpl_->panel_command_->task_orien_type = OrientControl::kEnd;
         pimpl_->panel_command_->arm_target_mode = PanelTargetMode::kWaypoint;
-        pimpl_->panel_command_->target_type = ControlType::kPosition;
-        pimpl_->panel_command_->actuator_mode = ControlType::kPosition;
+        pimpl_->switchTargetType(ControlType::kPosition, pimpl_->kActuatorModeForPositionTarget);
         pimpl_->panel_command_->reset_control_mem = true;
         pimpl_->panel_command_->reset_interpolation = true;
 
@@ -661,8 +645,7 @@ namespace spark2{
         pimpl_->panel_command_->motion_type = MotionControl::kTaskLine;
         pimpl_->panel_command_->task_orien_type = OrientControl::kEnd;
         pimpl_->panel_command_->arm_target_mode = PanelTargetMode::kSinglePoint;
-        pimpl_->panel_command_->target_type = ControlType::kPosition;
-        pimpl_->panel_command_->actuator_mode = ControlType::kPosition;
+        pimpl_->switchTargetType(ControlType::kPosition, pimpl_->kActuatorModeForPositionTarget);
         pimpl_->panel_command_->reset_control_mem = true;
         pimpl_->panel_command_->InterpolationAccTime = t;
         pimpl_->panel_command_->interpolation_speed_ratio = std::clamp(v / 100.0f, 0.0f, 1.0f);
@@ -687,8 +670,7 @@ namespace spark2{
         pimpl_->panel_command_->motion_type = MotionControl::kTaskLine;
         pimpl_->panel_command_->task_orien_type = OrientControl::kEnd;
         pimpl_->panel_command_->arm_target_mode = PanelTargetMode::kWaypoint;
-        pimpl_->panel_command_->target_type = ControlType::kPosition;
-        pimpl_->panel_command_->actuator_mode = ControlType::kPosition;
+        pimpl_->switchTargetType(ControlType::kPosition, pimpl_->kActuatorModeForPositionTarget);
         pimpl_->panel_command_->reset_control_mem = true;
         pimpl_->panel_command_->reset_interpolation = true;
         
@@ -745,39 +727,51 @@ namespace spark2{
     // Teach Mode
     void Spark2::startTeach(){
         pimpl_->ensureRobotStarted();
-        pimpl_->switchTargetType(ControlType::kTorque, ControlType::kTorque);
+        pimpl_->panel_command_->motion_type = MotionControl::kControlAlgorithm;
         pimpl_->panel_command_->control_algorithm = ControlAlgorithm::kGravity;
-        pimpl_->panel_command_->need_setting_update = true;
+        pimpl_->switchTargetType(ControlType::kTorque, ControlType::kTorque);
+        pimpl_->panel_command_->enable_recording = true;
         pimpl_->udpSendAndAckTask(); 
     }
 
     void Spark2::stopTeach(){
         pimpl_->ensureRobotStarted();
-        pimpl_->switchTargetType(ControlType::kPosition, ControlType::kPosition);
+        pimpl_->panel_command_->motion_type = MotionControl::kJoint;
         pimpl_->panel_command_->control_algorithm = ControlAlgorithm::kNone;
+        pimpl_->switchTargetType(ControlType::kPosition, pimpl_->kActuatorModeForPositionTarget);
+        pimpl_->panel_command_->enable_recording = false;
         pimpl_->udpSendAndAckTask(); 
-        pimpl_->panel_command_->need_setting_update = true;
     }
 
     // Playback Mode
     void Spark2::startPlayback(){
         pimpl_->ensureRobotStarted();
-        std::cout << "startPlayback() haven't been implemented" << std::endl;
+        pimpl_->panel_command_->motion_type = MotionControl::kPlayback;
+        pimpl_->switchTargetType(ControlType::kPosition, pimpl_->kActuatorModeForPositionTarget);
+        pimpl_->panel_command_->playback_cmd = PlaybackState::kStart;
+        pimpl_->panel_command_->InterpolationAccTime = 0;
+        pimpl_->panel_command_->interpolation_speed_ratio = 0.5f;
+        pimpl_->udpSendAndAckTask(); 
     }
 
     void Spark2::stopPlayback(){
         pimpl_->ensureRobotStarted();
-        std::cout << "stopPlayback() haven't been implemented" << std::endl;
+        pimpl_->panel_command_->motion_type = MotionControl::kPlayback;
+        pimpl_->switchTargetType(ControlType::kPosition, pimpl_->kActuatorModeForPositionTarget);
+        pimpl_->panel_command_->playback_cmd = PlaybackState::kStop;
+        pimpl_->panel_command_->InterpolationAccTime = 0;
+        pimpl_->panel_command_->interpolation_speed_ratio = 0.5f;
+        pimpl_->udpSendAndAckTask();
     }
 
     void Spark2::resetPlayback(){
         pimpl_->ensureRobotStarted();
-        std::cout << "resetPlayback() haven't been implemented" << std::endl;
-    }
-
-    void Spark2::loadPlayback(const std::string& filename){
-        pimpl_->ensureRobotStarted();
-        std::cout << "loadPlayback() haven't been implemented" << std::endl;
+        pimpl_->panel_command_->motion_type = MotionControl::kPlayback;
+        pimpl_->switchTargetType(ControlType::kPosition, pimpl_->kActuatorModeForPositionTarget);
+        pimpl_->panel_command_->playback_cmd = PlaybackState::kReset;
+        pimpl_->panel_command_->InterpolationAccTime = 0;
+        pimpl_->panel_command_->interpolation_speed_ratio = 0.5f;
+        pimpl_->udpSendAndAckTask();
     }
 
     // Feedback

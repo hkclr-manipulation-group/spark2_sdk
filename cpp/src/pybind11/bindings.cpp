@@ -255,7 +255,6 @@ PYBIND11_MODULE(_spark2_sdk_cpp, m) {
         .def("start_playback", &spark2::Spark2::startPlayback)
         .def("stop_playback", &spark2::Spark2::stopPlayback)
         .def("reset_playback", &spark2::Spark2::resetPlayback)
-        .def("load_playback", &spark2::Spark2::loadPlayback)
         .def("get_pos", &spark2::Spark2::getPos)
         .def("get_vel", &spark2::Spark2::getVel)
         .def("get_tor", &spark2::Spark2::getTor)

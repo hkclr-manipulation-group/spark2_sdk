@@ -5,7 +5,7 @@ def main() -> None:
     config_prefix_path = get_config_prefix_path()
     robot = Spark2(config_prefix_path)
     robot.start()
-    robot.enable_robot_joint(JointState6b([True, True, True, True, True, True]))
+    robot.enable_arm_joint(JointState6b([True, True, True, True, True, True]))
     print("Arm started")
 
     v = 30

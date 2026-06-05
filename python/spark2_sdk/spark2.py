@@ -82,6 +82,7 @@ class Spark2:
     # --- Teach mode ---
     def start_teach(self) -> None:
         self._internal.start_teach()
+        
     def stop_teach(self) -> None:
         self._internal.stop_teach()
 

@@ -79,37 +79,43 @@ int main(int argc, char *argv[]){
     std::cout << "Arm started" << std::endl;
 
     float print_dt = 0.3;
-    float timeout = 15;
+    float timeout = 50;
     std::string prefix_text = "";
     Pose current_pose;
     RobotJointStatef current_joint_pos;
 
     //-------------------------Start Teach---------------------------------
-    prefix_text = "==> You can freely move the robot robot to any pose.\n";
+    std::cout <<"Press any key to START TEACH...\n";
+    getch();
     robot.startTeach();
 
     //-------------------------Stop Teach----------------------------------
-    std::cout <<"Press any key to stop teach...";
+    std::cout <<"Press any key to STOP TEACH...\n";
     getch();
     robot.stopTeach();
-    std::cout <<"Teach mode stopped.\n";
 
-    //----------------------------Start Playback---------------------------
-    std::cout <<"Press any key to start playback...";
-    getch();
-    robot.startPlayback();
-    
-    //----------------------------Start Playback---------------------------
-    std::cout <<"Press any key to move to first point of playback...";
+    //----------------------------Reset Playback---------------------------
+    std::cout <<"Press any key to MOVE TO INITIAL POSITION of playback...\n";
     getch();
     robot.resetPlayback();
-    std::cout <<"Playback reset.\n";
+    prefix_text = "==> Go to initial position of playback.\n";
+    printFeedback(robot, print_dt, timeout, &current_joint_pos, nullptr, prefix_text);
 
-    // //----------------------------Go Home-------------------------------
-    std::cout <<"Press any key to go home...";
+    //----------------------------Start Playback---------------------------
+    std::cout <<"Press any key to START REPLAY...\n";
     getch();
+    robot.startPlayback();
+
+    //----------------------------Stop Playback---------------------------
+    std::cout <<"Press any key to STOP REPLAY...\n";
+    getch();
+    robot.stopPlayback();
+
+    //----------------------------Go Home-------------------------------
+    std::cout <<"Press any key to GO HOME...\n";
+    getch();
+    robot.goHome(30, 0);
     prefix_text = "==> Go home.\n";
-    robot.goHome();
     printFeedback(robot, print_dt, timeout, &current_joint_pos, nullptr, prefix_text);
 
     std::cout << "Motion completed" << std::endl;

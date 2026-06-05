@@ -81,6 +81,7 @@ namespace spark2{
             panel_command_->reset_control_mem = false;
             panel_command_->reset_interpolation = false;
             panel_command_->control_algorithm = ControlAlgorithm::kNone;
+            panel_command_->playback_cmd = PlaybackState::kStop;
             
             panel_command_->interpolation_type = stringToEnum<InterpolationMethod>(config["panel"]["general"]["interpolation"].as<std::string>());
             panel_command_->InterpolationAccTime = config["panel"]["general"]["acc_time"].as<float>();
@@ -261,12 +262,12 @@ namespace spark2{
             last_actuator_mode_ = panel_command_->actuator_mode;
         }
 
-        void udpSendAndAckTask(){
+        void udpSendAndAckTask(float exit_timeout_s = 20.0f){
             //Time in us
             long t = 0;
             long dt = receive_dt_us_*2;
             long resend_timeout = 1000000; // 1sec
-            long exit_timeout = 5000000; // 10 sec
+            long exit_timeout = exit_timeout_s*1e6; // 10 sec
             bool need_send = true;
 
             std::lock_guard<std::mutex> lock(panel_command_mutex_);
@@ -419,11 +420,9 @@ namespace spark2{
             pimpl_->started_ = true;
 
             //Send the first command of 0 velocity
-            long t0 = get_time_now();
-            pimpl_->udpSendAndAckTask();
+            pimpl_->udpSendAndAckTask(20); //exit_time_s = 20
 
             //Switch back to config's initial mode
-            long t1 = get_time_now();
             pimpl_->switchTargetType(pimpl_->initial_target_type_, pimpl_->initial_actuator_mode_);
             pimpl_->udpSendAndAckTask();
         }catch (const std::exception& e) {
@@ -447,6 +446,7 @@ namespace spark2{
         }
         pimpl_->panel_command_->need_setting_update = true;
         pimpl_->udpSendAndAckTask(); 
+        std::cout <<"FINISH ENABLE JOINT\n";
     }
 
     // Motion Mode
@@ -750,7 +750,8 @@ namespace spark2{
         pimpl_->switchTargetType(ControlType::kPosition, pimpl_->kActuatorModeForPositionTarget);
         pimpl_->panel_command_->playback_cmd = PlaybackState::kStart;
         pimpl_->panel_command_->InterpolationAccTime = 0;
-        pimpl_->panel_command_->interpolation_speed_ratio = 0.5f;
+        pimpl_->panel_command_->interpolation_speed_ratio = 0.2f;
+        std::cout <<"CALLED START\n";
         pimpl_->udpSendAndAckTask(); 
     }
 
@@ -760,7 +761,7 @@ namespace spark2{
         pimpl_->switchTargetType(ControlType::kPosition, pimpl_->kActuatorModeForPositionTarget);
         pimpl_->panel_command_->playback_cmd = PlaybackState::kStop;
         pimpl_->panel_command_->InterpolationAccTime = 0;
-        pimpl_->panel_command_->interpolation_speed_ratio = 0.5f;
+        pimpl_->panel_command_->interpolation_speed_ratio = 0.2f;
         pimpl_->udpSendAndAckTask();
     }
 
@@ -770,7 +771,8 @@ namespace spark2{
         pimpl_->switchTargetType(ControlType::kPosition, pimpl_->kActuatorModeForPositionTarget);
         pimpl_->panel_command_->playback_cmd = PlaybackState::kReset;
         pimpl_->panel_command_->InterpolationAccTime = 0;
-        pimpl_->panel_command_->interpolation_speed_ratio = 0.5f;
+        pimpl_->panel_command_->interpolation_speed_ratio = 0.2f;
+        std::cout <<"CALLED RESET\n";
         pimpl_->udpSendAndAckTask();
     }
 

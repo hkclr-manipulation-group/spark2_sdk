@@ -132,9 +132,8 @@ Python helpers in `spark2_sdk.utils` can auto-discover `cuarm_configuration` by 
 |---|---|---|
 | Single-point motion | `move_point.cpp` | `move_point.py` |
 | Path motion | `move_path.cpp` | `move_path.py` |
+| Teach and Playback | `teach_and_playback.cpp` | `teach_and_playback.py` |
 | Configuration | `set_configuration.cpp` | `set_configuration.py` |
-| Teach mode | `teach_mode.cpp` | `teach_mode.py` |
-| Playback mode | `playback_mode.cpp` | `playback_mode.py` |
 | Kinematics | `calculate_kinematics.cpp` | `calculate_kinematics.py` |
 
 **Python**

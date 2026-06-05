@@ -751,7 +751,6 @@ namespace spark2{
         pimpl_->panel_command_->playback_cmd = PlaybackState::kStart;
         pimpl_->panel_command_->InterpolationAccTime = 0;
         pimpl_->panel_command_->interpolation_speed_ratio = 0.2f;
-        std::cout <<"CALLED START\n";
         pimpl_->udpSendAndAckTask(); 
     }
 
@@ -772,7 +771,6 @@ namespace spark2{
         pimpl_->panel_command_->playback_cmd = PlaybackState::kReset;
         pimpl_->panel_command_->InterpolationAccTime = 0;
         pimpl_->panel_command_->interpolation_speed_ratio = 0.2f;
-        std::cout <<"CALLED RESET\n";
         pimpl_->udpSendAndAckTask();
     }
 

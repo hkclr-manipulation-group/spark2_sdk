@@ -13,11 +13,10 @@ spark2_sdk/
 |   |-- kinematics.h     (kinematics API)
 |   `-- types.h          (shared data types/enums)
 |-- examples/
-|   |-- move_single_point.cpp
+|   |-- move_point.cpp
 |   |-- move_path.cpp
+|   |-- teach_and_playback.cpp
 |   |-- set_configuration.cpp
-|   |-- teach_mode.cpp
-|   |-- playback_mode.cpp
 |   `-- calculate_kinematics.cpp
 ```
 
@@ -44,7 +43,6 @@ spark2_sdk/
 | `moveGripperPos(pos, v=50, t=0)` | Command gripper joint position. | manual motion |
 | `startTeach(), stopTeach()` | Enter or exit teach mode. | teach mode |
 | `startPlayback(), stopPlayback(), resetPlayback()` | Control playback mode lifecycle. | playback mode |
-| `loadPlayback(filename)` | Load playback trajectory or script file. | playback mode |
 | `getPos(), getVel(), getTor()` | Read current joint position, velocity, and torque. | feedback |
 | `getEEPose(), getToolPose()` | Read current end-effector/tool cartesian pose. | feedback |
 | `isArmJointEnabled()` | Read per-joint arm enable state. | status |

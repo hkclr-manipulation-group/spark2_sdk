@@ -22,9 +22,8 @@ python/
 |-- examples/
 |   |-- move_point.py
 |   |-- move_path.py
+|   |-- teach_and_playback.py
 |   |-- set_configuration.py
-|   |-- teach_mode.py
-|   |-- playback_mode.py
 |   `-- calculate_kinematics.py
 ```
 
@@ -51,7 +50,6 @@ python/
 | `move_gripper_pos(pos, v=50, t=0.0)` | Command gripper joint position. | manual motion |
 | `start_teach(), stop_teach()` | Enter or exit teach mode. | teach mode |
 | `start_playback(), stop_playback(), reset_playback()` | Control playback mode lifecycle. | playback mode |
-| `load_playback(filename)` | Load playback trajectory or script file. | playback mode |
 | `get_pos(), get_vel(), get_tor()` | Read current joint position, velocity, and torque. | feedback |
 | `get_ee_pose(), get_tool_pose()` | Read current end-effector/tool cartesian pose. | feedback |
 | `is_arm_joint_enabled()` | Read per-joint arm enable state. | status |

@@ -2,7 +2,6 @@
 #define CONFIGURATOR_IMPL_H
 
 #include "robot_platform_utils/cpp/include/cuarm_state.h"
-#include "robot_platform_utils/cpp/include/cuarm_tcp.h"
 
 namespace spark2{
     struct Configurator::Impl{

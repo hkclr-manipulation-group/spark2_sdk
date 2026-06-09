@@ -2,9 +2,6 @@
 #include "configurator_impl.h"
 
 #include <iostream>
-
-#include "robot_platform_utils/cpp/include/cuarm_tcp.h"
-#include "robot_platform_utils/cpp/include/cuarm_state.h"
 #include "robot_platform_utils/cpp/include/cuarm_message_handler.h"
 #include "robot_platform_utils/cpp/include/cuarm_state.h"
 

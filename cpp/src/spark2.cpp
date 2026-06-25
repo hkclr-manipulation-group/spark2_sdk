@@ -5,6 +5,7 @@
 #include <memory>
 #include <chrono>
 #include <thread>
+#include <mutex>
 #include <functional>
 
 #include "robot_platform_utils/cpp/include/config_loader.h"
@@ -46,11 +47,11 @@ namespace spark2{
         ControlType initial_actuator_mode_;
         ControlType last_target_type_;
         ControlType last_actuator_mode_;
+        ControlType actuator_mode_under_position_control_;
         MotionControl last_motion_control_;
         std::vector<RobotJointStatef> playback_;
         std::mutex panel_command_mutex_;
 
-        const ControlType kActuatorModeForPositionTarget = ControlType::kPosition;
 
         void initialize(const YAML::Node& config){
             //Initialize class variables
@@ -90,6 +91,8 @@ namespace spark2{
 
             initial_target_type_ = stringToEnum<ControlType>(config["panel"]["general"]["target_type"].as<std::string>());
             initial_actuator_mode_ = stringToEnum<ControlType>(config["panel"]["general"]["actuator_mode"].as<std::string>());
+            actuator_mode_under_position_control_ = (initial_target_type_ == ControlType::kPosition)? initial_actuator_mode_ : ControlType::kPosition;
+            
             panel_command_->target_type = ControlType::kVelocity;
             panel_command_->actuator_mode = ControlType::kVelocity;
             last_motion_control_ = panel_command_->motion_type;
@@ -400,11 +403,11 @@ namespace spark2{
         //Initialize UDP
         try {
             YAML::Node config = pimpl_->config_;
-            int buffer_size = 4096;
+            int buffer_size = 8192;
             pimpl_->udp_ = std::make_unique<CuarmUdp<PlannerState, PanelCommand>>(
-                (char*)config["panel"]["ip"].as<std::string>().c_str(),
+                config["panel"]["ip"].as<std::string>(),
                 config["panel"]["port"].as<int>(),
-                (char*)config["rt_control"]["ip"].as<std::string>().c_str(),
+                config["rt_control"]["ip"].as<std::string>(),
                 config["rt_control"]["port"].as<int>(), 
                 &CuarmMessageHandler::unpack_planner_state,
                 &CuarmMessageHandler::pack_panel_command, buffer_size);
@@ -477,7 +480,7 @@ namespace spark2{
         pimpl_->ensureRobotStarted();
         pimpl_->panel_command_->motion_type = MotionControl::kJoint;
         pimpl_->panel_command_->arm_target_mode = PanelTargetMode::kSinglePoint;
-        pimpl_->switchTargetType(ControlType::kPosition, pimpl_->kActuatorModeForPositionTarget);
+        pimpl_->switchTargetType(ControlType::kPosition, pimpl_->actuator_mode_under_position_control_);
         pimpl_->panel_command_->InterpolationAccTime = t;
         pimpl_->panel_command_->interpolation_speed_ratio = std::clamp(v / 100.0f, 0.0f, 1.0f);
         
@@ -495,7 +498,7 @@ namespace spark2{
 
         pimpl_->panel_command_->motion_type = MotionControl::kJoint;
         pimpl_->panel_command_->arm_target_mode = PanelTargetMode::kWaypoint;
-        pimpl_->switchTargetType(ControlType::kPosition, pimpl_->kActuatorModeForPositionTarget);
+        pimpl_->switchTargetType(ControlType::kPosition, pimpl_->actuator_mode_under_position_control_);
         pimpl_->panel_command_->reset_interpolation = true;
 
         int arm_i = 0;
@@ -581,7 +584,7 @@ namespace spark2{
         pimpl_->panel_command_->motion_type = MotionControl::kTask;
         pimpl_->panel_command_->task_orien_type = OrientControl::kEnd;
         pimpl_->panel_command_->arm_target_mode = PanelTargetMode::kSinglePoint;
-        pimpl_->switchTargetType(ControlType::kPosition, pimpl_->kActuatorModeForPositionTarget);
+        pimpl_->switchTargetType(ControlType::kPosition, pimpl_->actuator_mode_under_position_control_);
         pimpl_->panel_command_->reset_control_mem = true;
         pimpl_->panel_command_->InterpolationAccTime = t;
         pimpl_->panel_command_->interpolation_speed_ratio = std::clamp(v / 100.0f, 0.0f, 1.0f);
@@ -607,7 +610,7 @@ namespace spark2{
         pimpl_->panel_command_->motion_type = MotionControl::kTask;
         pimpl_->panel_command_->task_orien_type = OrientControl::kEnd;
         pimpl_->panel_command_->arm_target_mode = PanelTargetMode::kWaypoint;
-        pimpl_->switchTargetType(ControlType::kPosition, pimpl_->kActuatorModeForPositionTarget);
+        pimpl_->switchTargetType(ControlType::kPosition, pimpl_->actuator_mode_under_position_control_);
         pimpl_->panel_command_->reset_control_mem = true;
         pimpl_->panel_command_->reset_interpolation = true;
 
@@ -645,7 +648,7 @@ namespace spark2{
         pimpl_->panel_command_->motion_type = MotionControl::kTaskLine;
         pimpl_->panel_command_->task_orien_type = OrientControl::kEnd;
         pimpl_->panel_command_->arm_target_mode = PanelTargetMode::kSinglePoint;
-        pimpl_->switchTargetType(ControlType::kPosition, pimpl_->kActuatorModeForPositionTarget);
+        pimpl_->switchTargetType(ControlType::kPosition, pimpl_->actuator_mode_under_position_control_);
         pimpl_->panel_command_->reset_control_mem = true;
         pimpl_->panel_command_->InterpolationAccTime = t;
         pimpl_->panel_command_->interpolation_speed_ratio = std::clamp(v / 100.0f, 0.0f, 1.0f);
@@ -670,7 +673,7 @@ namespace spark2{
         pimpl_->panel_command_->motion_type = MotionControl::kTaskLine;
         pimpl_->panel_command_->task_orien_type = OrientControl::kEnd;
         pimpl_->panel_command_->arm_target_mode = PanelTargetMode::kWaypoint;
-        pimpl_->switchTargetType(ControlType::kPosition, pimpl_->kActuatorModeForPositionTarget);
+        pimpl_->switchTargetType(ControlType::kPosition, pimpl_->actuator_mode_under_position_control_);
         pimpl_->panel_command_->reset_control_mem = true;
         pimpl_->panel_command_->reset_interpolation = true;
         
@@ -738,7 +741,7 @@ namespace spark2{
         pimpl_->ensureRobotStarted();
         pimpl_->panel_command_->motion_type = MotionControl::kJoint;
         pimpl_->panel_command_->control_algorithm = ControlAlgorithm::kNone;
-        pimpl_->switchTargetType(ControlType::kPosition, pimpl_->kActuatorModeForPositionTarget);
+        pimpl_->switchTargetType(ControlType::kPosition, pimpl_->actuator_mode_under_position_control_);
         pimpl_->panel_command_->enable_recording = false;
         pimpl_->udpSendAndAckTask(); 
     }
@@ -747,7 +750,7 @@ namespace spark2{
     void Spark2::startPlayback(){
         pimpl_->ensureRobotStarted();
         pimpl_->panel_command_->motion_type = MotionControl::kPlayback;
-        pimpl_->switchTargetType(ControlType::kPosition, pimpl_->kActuatorModeForPositionTarget);
+        pimpl_->switchTargetType(ControlType::kPosition, pimpl_->actuator_mode_under_position_control_);
         pimpl_->panel_command_->playback_cmd = PlaybackState::kStart;
         pimpl_->panel_command_->InterpolationAccTime = 0;
         pimpl_->panel_command_->interpolation_speed_ratio = 0.2f;
@@ -757,7 +760,7 @@ namespace spark2{
     void Spark2::stopPlayback(){
         pimpl_->ensureRobotStarted();
         pimpl_->panel_command_->motion_type = MotionControl::kPlayback;
-        pimpl_->switchTargetType(ControlType::kPosition, pimpl_->kActuatorModeForPositionTarget);
+        pimpl_->switchTargetType(ControlType::kPosition, pimpl_->actuator_mode_under_position_control_);
         pimpl_->panel_command_->playback_cmd = PlaybackState::kStop;
         pimpl_->panel_command_->InterpolationAccTime = 0;
         pimpl_->panel_command_->interpolation_speed_ratio = 0.2f;
@@ -767,7 +770,7 @@ namespace spark2{
     void Spark2::resetPlayback(){
         pimpl_->ensureRobotStarted();
         pimpl_->panel_command_->motion_type = MotionControl::kPlayback;
-        pimpl_->switchTargetType(ControlType::kPosition, pimpl_->kActuatorModeForPositionTarget);
+        pimpl_->switchTargetType(ControlType::kPosition, pimpl_->actuator_mode_under_position_control_);
         pimpl_->panel_command_->playback_cmd = PlaybackState::kReset;
         pimpl_->panel_command_->InterpolationAccTime = 0;
         pimpl_->panel_command_->interpolation_speed_ratio = 0.2f;

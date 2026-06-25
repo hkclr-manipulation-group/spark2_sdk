@@ -10,24 +10,41 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 ###################################OS Settings###########################################
-add_definitions(-DARCHITECTURE)
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64" OR CMAKE_SYSTEM_PROCESSOR MATCHES "arm64")
-    message(STATUS "Building for Linux-ARM architecture")
-    set(ARCHITECTURE "arm64")
-    add_definitions(-DARCHITECTURE_ARM64=1)
+    if(WIN32)
+        set(PLATFORM_NAME "win_arm64")
+    else()
+        set(PLATFORM_NAME "linux_arm64")
+    endif()
 else() 
-    message(STATUS "Building for Linux-x86 architecture")
-    set(ARCHITECTURE "x86")
-    add_definitions(-DARCHITECTURE_X86=1)
+    if(WIN32)
+        set(PLATFORM_NAME "win_x64")
+    else()
+        set(PLATFORM_NAME "linux_x86_64")
+    endif()
 endif()
 
+if(MSVC)
+    if(MSVC_VERSION VERSION_GREATER_EQUAL 1940)
+        set(TOOLCHAIN_VARIANT "msvc2022_v143")
+    elseif(MSVC_VERSION VERSION_GREATER_EQUAL 1920)
+        set(TOOLCHAIN_VARIANT "msvc2019_v142")
+    else()
+        set(TOOLCHAIN_VARIANT "msvc_unknown")
+    endif()
+else()
+    set(TOOLCHAIN_VARIANT "gcc_linux")
+endif()
+set(PYTHON_LIB_PATH "${CMAKE_CURRENT_LIST_DIR}/../spark2_python_dist/spark2_sdk/lib/${PLATFORM_NAME}/${TOOLCHAIN_VARIANT}")
+set(CPP_INSTALL_PATH "lib/${PLATFORM_NAME}/${TOOLCHAIN_VARIANT}")
+
 ###################################Build Switches###########################################
-option(BUILD_PYTHON_LIB "Build Python library" OFF)
+option(BUILD_PYTHON_LIB "Build Python library" ON)
 
 ###################################Add subdirectory#################################################
 cmake_path(GET PROJECT_SOURCE_DIR PARENT_PATH PARENT_DIR)
 cmake_path(GET PARENT_DIR PARENT_PATH GRANDPARENT_DIR )
-set (CONFIG_PREFIX_PATH ${GRANDPARENT_DIR}/cuarm_configuration)
+set (CONFIG_PATH ${GRANDPARENT_DIR}/cuarm_configuration/arm_v1)
 
 #Find the pre-compiled robotics library first
 set(LIB_SEARCH_DIR ${GRANDPARENT_DIR}/cuarm_rt_control/build)
@@ -90,59 +107,71 @@ else()
 endif()
 
 ###################################Generate Library######################################
-add_library(spark2_sdk
+add_library(spark2_sdk SHARED
     ${PROJECT_SOURCE_DIR}/src/spark2.cpp
     ${PROJECT_SOURCE_DIR}/src/configurator.cpp
     ${PROJECT_SOURCE_DIR}/src/kinematics.cpp
 )
 
+set_target_properties(spark2_sdk PROPERTIES
+    WINDOWS_EXPORT_ALL_SYMBOLS ON
+)
+
 target_include_directories(spark2_sdk PUBLIC
     ${PROJECT_SOURCE_DIR}/src
     ${PROJECT_SOURCE_DIR}/include
+)
+
+target_include_directories(spark2_sdk PRIVATE
     ${GRANDPARENT_DIR}
     ${GRANDPARENT_DIR}/cuarm_rt_control
 )
 
-target_link_libraries(spark2_sdk
-    pthread
+target_link_libraries(spark2_sdk PRIVATE
     cuarm_robotics::robotics
 )
 
 ###################################Generate Python Library######################################
-
-if(ARCHITECTURE_ARM64)
-    set(LIB_PATH "${CMAKE_CURRENT_LIST_DIR}/../python/spark2_sdk/lib/arm64")
-else()
-    set(LIB_PATH "${CMAKE_CURRENT_LIST_DIR}/../python/spark2_sdk/lib/x86")
-endif()
-
 if(BUILD_PYTHON_LIB)
+    message(STATUS "---------------Generate Python Library----------------------")
     # --- Use python3 in the same environment ---
-    execute_process(
-        COMMAND which python3
-        OUTPUT_VARIABLE PYTHON_PATH
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
-    set(Python3_EXECUTABLE ${PYTHON_PATH} CACHE FILEPATH "Python 3 interpreter")
-    find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
+    set(Python3_FIND_STRATEGY LOCATION)
+    set(Python3_FIND_REGISTRY NEVER) 
+    find_package(Python3 COMPONENTS Interpreter Development.Module REQUIRED)
 
-    # --- Force pybind11 from the same environment ---
+    # Locate pybind11 directly using the discovered Python executable
     execute_process(
         COMMAND ${Python3_EXECUTABLE} -m pybind11 --cmakedir
         OUTPUT_VARIABLE pybind11_DIR
         OUTPUT_STRIP_TRAILING_WHITESPACE
     )
+    cmake_path(CONVERT "${pybind11_DIR}" TO_CMAKE_PATH_LIST pybind11_DIR)
     find_package(pybind11 REQUIRED CONFIG PATHS ${pybind11_DIR})
 
     pybind11_add_module(_spark2_sdk_cpp
         ${PROJECT_SOURCE_DIR}/src/pybind11/bindings.cpp
     )
+
     target_link_libraries(_spark2_sdk_cpp PRIVATE spark2_sdk)
     target_include_directories(_spark2_sdk_cpp PRIVATE
         ${PROJECT_SOURCE_DIR}/include
     )
     set_target_properties(_spark2_sdk_cpp PROPERTIES
-        LIBRARY_OUTPUT_DIRECTORY "${LIB_PATH}"
+        LIBRARY_OUTPUT_DIRECTORY "${PYTHON_LIB_PATH}"
+    )
+    set_target_properties(_spark2_sdk_cpp PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY_RELEASE "${PYTHON_LIB_PATH}"
+        LIBRARY_OUTPUT_DIRECTORY_DEBUG   "${PYTHON_LIB_PATH}"
+        LIBRARY_OUTPUT_DIRECTORY_MINSIZEREL "${PYTHON_LIB_PATH}"
+        LIBRARY_OUTPUT_DIRECTORY_RELWITHDEBINFO "${PYTHON_LIB_PATH}"
+    )
+
+    add_custom_command(TARGET _spark2_sdk_cpp POST_BUILD
+        # Copies spark2_sdk (.dll on Win, .so on Linux) next to your python module (.pyd/.so)
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:spark2_sdk>"          
+            "$<TARGET_FILE_DIR:_spark2_sdk_cpp>" 
+        COMMENT "[PYTHON BINDINGS] Deploying runtime shared library engine directly into Python tree..."
     )
 endif()
 
@@ -156,12 +185,56 @@ foreach(EXAMPLE_SRC ${EXAMPLE_SRCS})
     add_executable(${EXECUTABLE_NAME}
         ${EXAMPLE_SRC}
     )
-
     target_link_libraries(${EXECUTABLE_NAME}
         spark2_sdk
     )
-
     target_compile_definitions(${EXECUTABLE_NAME} PUBLIC 
-        CONFIG_PREFIX_PATH="${CONFIG_PREFIX_PATH}/arm_v1"
+        CONFIG_PREFIX_PATH="${CONFIG_PATH}"
     )
+
+    if(WIN32)
+        add_custom_command(TARGET ${EXECUTABLE_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_RUNTIME_DLLS:${EXECUTABLE_NAME}>"          
+                "$<TARGET_FILE_DIR:${EXECUTABLE_NAME}>" 
+            COMMAND_EXPAND_LISTS
+            COMMENT "Build-time: Deploying Conda DLLs for ${EXECUTABLE_NAME}..."
+        )
+    endif()
 endforeach()
+
+
+##########################################Install############################################
+set(DIST_OUTPUT_DIR "${PROJECT_SOURCE_DIR}/../spark2_cpp_dist")
+set(INSTALL_BIN_DIR "${DIST_OUTPUT_DIR}/${CPP_INSTALL_PATH}")
+
+if(WIN32)
+    install(TARGETS spark2_sdk
+        RUNTIME DESTINATION "${INSTALL_BIN_DIR}"
+        ARCHIVE DESTINATION "${INSTALL_BIN_DIR}"
+    )    
+else()
+    install(TARGETS spark2_sdk
+        LIBRARY DESTINATION "${INSTALL_BIN_DIR}"
+    )
+endif()
+
+install(DIRECTORY "${PROJECT_SOURCE_DIR}/include/"
+    DESTINATION "${DIST_OUTPUT_DIR}/include"
+    FILES_MATCHING PATTERN "*.h"
+)
+
+install(DIRECTORY "${PROJECT_SOURCE_DIR}/examples/"
+    DESTINATION "${DIST_OUTPUT_DIR}/examples"
+    FILES_MATCHING PATTERN "*.cpp"
+)
+
+install(DIRECTORY "${CONFIG_PATH}/"
+    DESTINATION "${PROJECT_SOURCE_DIR}/../configuration"
+)
+
+########################################## Auto-Deploy Sync ############################################
+add_custom_command(TARGET spark2_sdk POST_BUILD
+    COMMAND ${CMAKE_COMMAND} --install "${CMAKE_BINARY_DIR}" --config $<CONFIG>
+    COMMENT "[AUTO-DEPLOY] Syncing binaries to python/ modules and spark2_sdk_dist/ packages..."
+)

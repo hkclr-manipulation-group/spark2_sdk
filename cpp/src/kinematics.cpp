@@ -42,7 +42,7 @@ namespace spark2{
             tool_offset << offset_node[0].as<float>(), offset_node[1].as<float>(), offset_node[2].as<float>();
         }
         std::string urdf_filename = config["robot"]["urdf"].as<std::string>();
-        std::string urdf_path = std::filesystem::canonical(std::filesystem::path(config_prefix_path + '/' + urdf_filename));
+        std::string urdf_path = std::filesystem::canonical(std::filesystem::path(config_prefix_path + '/' + urdf_filename)).string();
         std::string library_name = config["rt_control"]["robotics_library"].as<std::string>();
         std::string ee_link = link_names[link_names.size()-1];
         robotics_ = new Robotics(urdf_path, joint_names, ee_link, tool_offset, arm_i_, joint_size, 

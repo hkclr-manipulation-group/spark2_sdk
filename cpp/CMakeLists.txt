@@ -53,7 +53,7 @@ option(BUILD_PYTHON_LIB "Build Python library" ON)
 ###################################Add subdirectory#################################################
 cmake_path(GET PROJECT_SOURCE_DIR PARENT_PATH PARENT_DIR)
 cmake_path(GET PARENT_DIR PARENT_PATH GRANDPARENT_DIR )
-set (CONFIG_PATH ${GRANDPARENT_DIR}/cuarm_configuration/arm_v1)
+set (CONFIG_PATH ${GRANDPARENT_DIR}/cuarm_configuration/spark2_v1)
 
 #Find the pre-compiled robotics library first
 set(LIB_SEARCH_DIR ${GRANDPARENT_DIR}/cuarm_rt_control/build)

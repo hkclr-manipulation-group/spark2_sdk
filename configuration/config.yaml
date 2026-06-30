@@ -3,8 +3,7 @@ panel:
   enable_ndi: false
   dt_send: 0.03
   dt_receive: 0.005 #Need to be faster than rt_control's sending frequency
-  # ip: 127.0.0.1
-  ip: 172.19.48.1
+  ip: 127.0.0.1
   port: 12301
   general:
     interpolation: Cos
@@ -35,8 +34,7 @@ panel:
 rt_control:
   dt_send: 0.01
   dt_receive: 0.02 #Need to be faster than panel's sending frequency
-  # ip: 127.0.0.1
-  ip: 172.19.54.129
+  ip: 127.0.0.1
   port: 12201
   robotics_library: pinocchio
   hardware_simulation: true

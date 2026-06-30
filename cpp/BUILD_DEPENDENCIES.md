@@ -143,13 +143,14 @@ Because `urdfdom` forces a dynamic configuration by default on Windows, you must
 
 ### 🚀 Step 5: Patch and Build Pinocchio
 :: Note: -D_WIN32_WINNT=0x0A00 restricts the compilation target to Windows 10 & 11 only.
-
 1. Clone Pinocchio along with its submodules:
    ```cmd
    cd /d "%WORKSPACE%"
-   git clone --recursive https://github.com/stack-of-tasks/pinocchio
+   git clone --recursive https://github.com
    ```
-2. 🛑 **MANUAL STEP 1:** Open `pinocchio\src\CMakeLists.txt`. Find the line `set(LIBRARY_TYPE SHARED)` (around line 140) and change it to `set(LIBRARY_TYPE STATIC)` to force the library targets to compile as static archives instead of DLLs.
+
+2. 🛑 **MANUAL STEP 1:** Open `pinocchio\src\CMakeLists.txt`. Find the line `set(LIBRARY_TYPE SHARED)` (around line 140) and change it to `set(LIBRARY_TYPE STATIC)` to force the parser sub-targets to compile as static archives instead of DLLs.
+
 3. 🛑 **MANUAL STEP 2:** Open `%WORKSPACE%\pinocchio\CMakeLists.txt` in a text editor. Move to the dependency validation area (around lines 315-390). Add the explicit upstream package lookups directly **before** the `urdfdom` dependency blocks:
    ```cmake
    find_package(console_bridge REQUIRED)
@@ -158,24 +159,55 @@ Because `urdfdom` forces a dynamic configuration by default on Windows, you must
    add_project_dependency(urdfdom_headers REQUIRED)
    add_project_dependency(urdfdom REQUIRED)
    ```
-4. Clear your build target namespace and run the final compilation (note the inclusion of `-DBUILD_TESTING=OFF` to prevent Boost unit test macro clashes and `-D_WIN32_WINNT=0x0A00` to target Windows 10/11):
+
+4. 🛑 **MANUAL STEP 3:** Open `D:\pkgs\pinocchio\cmake\config.hh.cmake`. Locate the `# ifdef @LIBRARY_NAME@_STATIC` block at the bottom. 
+
+   Specifically add the following two macro definitions to clear out the dynamic API visibility suffixes for static linking:
+   * `#  define @LIBRARY_NAME@_EXPLICIT_INSTANTIATION_DECLARATION_DLLAPI`
+   * `#  define @LIBRARY_NAME@_EXPLICIT_INSTANTIATION_DEFINITION_DLLAPI`
+
+   The updated block must look exactly like this:
+   ```cpp
+   # ifdef @LIBRARY_NAME@_STATIC
+   // If one is using the library statically, get rid of
+   // extra information and use standard explicit template
+   // instantiation keyword.
+   #  define @LIBRARY_NAME@_DLLAPI
+   #  define @LIBRARY_NAME@_LOCAL
+   #  define @LIBRARY_NAME@_EXPLICIT_INSTANTIATION_DECLARATION extern template
+   #  define @LIBRARY_NAME@_EXPLICIT_INSTANTIATION_DECLARATION_DLLAPI
+   #  define @LIBRARY_NAME@_EXPLICIT_INSTANTIATION_DEFINITION_DLLAPI
+   ```
+
+5. 🛑 **MANUAL STEP 4:** Overwrite the heavy abstract rendering module to prevent MSVC heap exhaustion (`code=2`) during the visualizer target compilation pass:
    ```cmd
-   cd /d "%WORKSPACE%\pinocchio" && mkdir build && cd build
+   echo // Stub to bypass MSVC template memory crash > "%WORKSPACE%\pinocchio\src\visualizers\base-visualizer.cpp"
+   ```
+
+6. Clear your build directory and run the compilation step using global variable assignments to ensure proper cascading down to secondary parser archives:
+   ```cmd
+   cd /d "%WORKSPACE%\pinocchio" && rmdir /s /q build && mkdir build && cd build
    cmake .. -G "Ninja" ^
      -DCMAKE_BUILD_TYPE=Release ^
      -DBUILD_SHARED_LIBS=OFF ^
+     -DENABLE_TEMPLATE_INSTANTIATION=OFF ^
      -DBUILD_TESTING=OFF ^
      -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded ^
-     -DCMAKE_CXX_FLAGS_RELEASE="/MT /O2 /Ob2 /DNDEBUG -D_WIN32_WINNT=0x0A00 -DURDFDOM_STATIC" ^
-     -DCMAKE_C_FLAGS_RELEASE="/MT /O2 /Ob2 /DNDEBUG -D_WIN32_WINNT=0x0A00 -DURDFDOM_STATIC" ^
+     -DCMAKE_CXX_FLAGS="/DPINOCCHIO_STATIC /DPINOCCHIO_PARSERS_STATIC /DURDFDOM_STATIC /D_WIN32_WINNT=0x0A00 /DWINVER=0x0A00 /D__PRETTY_FUNCTION__=__FUNCSIG__" ^
+     -DCMAKE_CXX_FLAGS_RELEASE="/MT /O1 /Ob1 /DNDEBUG /Zm200" ^
+     -DCMAKE_C_FLAGS_RELEASE="/MT /O1 /Ob1 /DNDEBUG /Zm200" ^
      -DBUILD_WITH_CASADI_SUPPORT=OFF ^
      -DBUILD_WITH_COLLISION_SUPPORT=OFF ^
      -DBUILD_PYTHON_INTERFACE=OFF ^
      -DBoost_USE_STATIC_LIBS=ON ^
      -DBoost_USE_STATIC_RUNTIME=ON ^
-     -DBOOST_ROOT="%PREFIX%" ^
-     -DCMAKE_PREFIX_PATH="%PREFIX%" ^
-     -DCMAKE_INSTALL_PREFIX="%PREFIX%"
+     -DBOOST_ROOT="D:\pkgs\install" ^
+     -DCMAKE_PREFIX_PATH="D:\pkgs\install" ^
+     -DCMAKE_INSTALL_PREFIX="D:\pkgs\install"
+   ```
+
+7. Build and deploy the pristine static library components into your primary installation prefix directory:
+   ```cmd
    ninja && ninja install
    ```
 ---
@@ -269,27 +301,55 @@ ninja && ninja install
 ```
 
 #### 3. Pinocchio (With CMake Patch)
-```bash
-cd "\$WORKSPACE"
-git clone --recursive https://github.com
+1. Clone Pinocchio along with its submodules:
+   ```bash
+   cd "\$WORKSPACE"
+   git clone --recursive https://github.com/stack-of-tasks/pinocchio
+   ```
 
-# 🛑 AUTOMATED PATCH: Injects explicit upstream packages before the urdfdom block
-sed -i '/add_project_dependency(urdfdom_headers REQUIRED)/i find_package(console_bridge REQUIRED)\nfind_package(tinyxml2 REQUIRED)' pinocchio/CMakeLists.txt
+2. 🛑 **AUTOMATED PATCH 1:** Force internal library sub-targets to build as static archives instead of shared objects (`.so` DLLs):
+   ```bash
+   sed -i 's/set(LIBRARY_TYPE SHARED)/set(LIBRARY_TYPE STATIC)/g' pinocchio/src/CMakeLists.txt
+   ```
 
-cd pinocchio && mkdir build && cd build
-cmake .. -G "Ninja" \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DBUILD_SHARED_LIBS=OFF \
-  -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-  -DCMAKE_INSTALL_PREFIX="\$PREFIX" \
-  -DCMAKE_PREFIX_PATH="\$PREFIX" \
-  -DBUILD_WITH_CASADI_SUPPORT=OFF \
-  -DBUILD_WITH_COLLISION_SUPPORT=OFF \
-  -DBUILD_PYTHON_INTERFACE=OFF
+3. 🛑 **AUTOMATED PATCH 2:** Inject explicit console_bridge and tinyxml2 lookups directly before the `urdfdom` blocks:
+   ```bash
+   sed -i '/add_project_dependency(urdfdom_headers REQUIRED)/i find_package(console_bridge REQUIRED)\nfind_package(tinyxml2 REQUIRED)' pinocchio/CMakeLists.txt
+   ```
 
-ninja && ninja install
-```
+4. 🛑 **AUTOMATED PATCH 3:** Append the static explicit template macros directly into the configuration module template:
+   ```bash
+   sed -i '/#  define @LIBRARY_NAME@_EXPLICIT_INSTANTIATION_DECLARATION extern template/a #  define @LIBRARY_NAME@_EXPLICIT_INSTANTIATION_DECLARATION_DLLAPI\n#  define @LIBRARY_NAME@_EXPLICIT_INSTANTIATION_DEFINITION_DLLAPI' pinocchio/cmake/config.hh.cmake
+   ```
+   
+5. 🛑 **AUTOMATED PATCH 4:** Overwrite the unneeded abstract rendering module with an empty stub to significantly accelerate Linux compilation speeds:
+   ```bash
+   echo "// Stub to bypass template compilation and maximize build speeds" > pinocchio/src/visualizers/base-visualizer.cpp
+   ```
 
+6. Run the configuration step using global preprocessor flags to ensure proper cascading down to secondary parser binaries:
+   ```bash
+   cd pinocchio && mkdir build && cd build
+   cmake .. -G "Ninja" \
+     -DCMAKE_BUILD_TYPE=Release \
+     -DBUILD_SHARED_LIBS=OFF \
+     -DENABLE_TEMPLATE_INSTANTIATION=OFF \
+     -DBUILD_TESTING=OFF \
+     -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+     -DCMAKE_CXX_FLAGS="-DPINOCCHIO_STATIC -DPINOCCHIO_PARSERS_STATIC -DURDFDOM_STATIC" \
+     -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG" \
+     -DCMAKE_C_FLAGS_RELEASE="-O3 -DNDEBUG" \
+     -DBUILD_WITH_CASADI_SUPPORT=OFF \
+     -DBUILD_WITH_COLLISION_SUPPORT=OFF \
+     -DBUILD_PYTHON_INTERFACE=OFF \
+     -DCMAKE_PREFIX_PATH="\$PREFIX" \
+     -DCMAKE_INSTALL_PREFIX="\$PREFIX"
+   ```
+
+7. Build and deploy the pristine static library components into your primary installation prefix directory:
+   ```bash
+   ninja && ninja install
+   ```
 ---
 
 ### 🎉 Verification

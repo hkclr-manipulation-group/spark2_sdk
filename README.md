@@ -32,7 +32,7 @@ From the repository root:
 ```bash
 cd spark2_cpp_dist
 cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j
+cmake --build build --config Release --parallel
 ```
 
 This links against the pre-built `spark2_sdk` library under `spark2_cpp_dist/lib/<platform>/` and produces example executables in `spark2_cpp_dist/build/`. On Windows, `spark2_sdk.dll` is copied next to each executable automatically.

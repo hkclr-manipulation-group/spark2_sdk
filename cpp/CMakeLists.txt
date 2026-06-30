@@ -1,6 +1,15 @@
 cmake_minimum_required(VERSION 3.20)
 project(spark2_sdk)
 
+option(ROBOTICS_STATIC "Build using static variations of dependencies" OFF)
+if(MSVC)
+    if(ROBOTICS_STATIC)
+        set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")    # /MT
+    else()
+        set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL") # /MD
+    endif()
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -57,7 +66,11 @@ find_library(ROBOTICS_LIB_FILE
 # If NOT found, fallback to adding the source directory
 if(NOT ROBOTICS_LIB_FILE)
     message(STATUS "Compiled library not found in ${LIB_SEARCH_DIR}. Falling back to source compilation...")
-    
+    if(CMAKE_PREFIX_PATH)
+        cmake_path(CONVERT "${CMAKE_PREFIX_PATH}" TO_CMAKE_PATH_LIST CLEAN_PREFIX_PATH)
+        set(CMAKE_PREFIX_PATH "${CLEAN_PREFIX_PATH}")
+    endif()
+
     set(ROBOT_PLATFORM_UTILS_DIR "${GRANDPARENT_DIR}" CACHE PATH "Path to the utils repository")
     set(ROBOT_PLATFORM_UTILS_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}" CACHE PATH "Path to the utils repository binary directory")
     add_subdirectory(${GRANDPARENT_DIR}/cuarm_rt_control/cuarm_robotics ${CMAKE_BINARY_DIR}/cuarm_robotics)

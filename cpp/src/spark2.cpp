@@ -449,7 +449,6 @@ namespace spark2{
         }
         pimpl_->panel_command_->need_setting_update = true;
         pimpl_->udpSendAndAckTask(); 
-        std::cout <<"FINISH ENABLE JOINT\n";
     }
 
     // Motion Mode
@@ -512,11 +511,11 @@ namespace spark2{
         if (t.size() == arm_pos.size()){
             for (int i=0; i<pimpl_->panel_command_->ArmWaypointSize; i++){
                 pimpl_->panel_command_->ArmWaypointInterpolationTime[i] = t[i];
-                pimpl_->panel_command_->ArmWaypointInterpolationSpeedRatio[i] = 0;
             }
-        }else{
+        }
+
+        if (v.size() == arm_pos.size()){
             for (int i=0; i<pimpl_->panel_command_->ArmWaypointSize; i++){
-                pimpl_->panel_command_->ArmWaypointInterpolationTime[i] = 0;
                 pimpl_->panel_command_->ArmWaypointInterpolationSpeedRatio[i] = std::clamp(v[i] / 100.0f, 0.0f, 1.0f);
             }
         }
@@ -631,11 +630,11 @@ namespace spark2{
         if (t.size() == arm_tool.size()){
             for (int i=0; i<pimpl_->panel_command_->ArmWaypointSize; i++){
                 pimpl_->panel_command_->ArmWaypointInterpolationTime[i] = t[i];
-                pimpl_->panel_command_->ArmWaypointInterpolationSpeedRatio[i] = 0;
             }
-        }else{
+        }
+
+        if (v.size() == arm_tool.size()){
             for (int i=0; i<pimpl_->panel_command_->ArmWaypointSize; i++){
-                pimpl_->panel_command_->ArmWaypointInterpolationTime[i] = 0;
                 pimpl_->panel_command_->ArmWaypointInterpolationSpeedRatio[i] = std::clamp(v[i] / 100.0f, 0.0f, 1.0f);
             }
         }
@@ -694,11 +693,11 @@ namespace spark2{
         if (t.size() == arm_tool.size()){
             for (int i=0; i<pimpl_->panel_command_->ArmWaypointSize; i++){
                 pimpl_->panel_command_->ArmWaypointInterpolationTime[i] = t[i];
-                pimpl_->panel_command_->ArmWaypointInterpolationSpeedRatio[i] = 0;
             }
-        }else{
+        }
+
+        if (v.size() == arm_tool.size()){
             for (int i=0; i<pimpl_->panel_command_->ArmWaypointSize; i++){
-                pimpl_->panel_command_->ArmWaypointInterpolationTime[i] = 0;
                 pimpl_->panel_command_->ArmWaypointInterpolationSpeedRatio[i] = std::clamp(v[i] / 100.0f, 0.0f, 1.0f);
             }
         }

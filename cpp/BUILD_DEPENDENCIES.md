@@ -146,7 +146,7 @@ Because `urdfdom` forces a dynamic configuration by default on Windows, you must
 1. Clone Pinocchio along with its submodules:
    ```cmd
    cd /d "%WORKSPACE%"
-   git clone --recursive https://github.com
+   git clone --recursive https://github.com/stack-of-tasks/pinocchio
    ```
 
 2. 🛑 **MANUAL STEP 1:** Open `pinocchio\src\CMakeLists.txt`. Find the line `set(LIBRARY_TYPE SHARED)` (around line 140) and change it to `set(LIBRARY_TYPE STATIC)` to force the parser sub-targets to compile as static archives instead of DLLs.

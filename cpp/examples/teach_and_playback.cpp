@@ -1,5 +1,6 @@
 #include "spark2.h"
 
+#include <algorithm>
 #include <iostream>
 #include <thread>
 #include <chrono>
@@ -17,6 +18,9 @@ using namespace spark2;
 void printFeedback(const Spark2& robot, float dt, float timeout, RobotJointStatef* joint_pos=nullptr, Pose* tool_pose=nullptr, std::string prefix_text=""){
     int elapsed_time_ms = 0;
     int dt_ms = static_cast<int>(dt * 1000);
+    // Avoid treating the previous command's Idle as "motion finished" on the first poll.
+    const int idle_exit_grace_ms = std::max(dt_ms, 300);
+    bool seen_busy = false;
     bool is_idle = false;
     bool is_interrupted = false;
     SystemStatus sys_status;
@@ -52,9 +56,20 @@ void printFeedback(const Spark2& robot, float dt, float timeout, RobotJointState
         sys_status = robot.getStatus();
         robot.printStatus(sys_status);
         is_idle = sys_status.robot_state == spark2::RobotState::kIdle;
-        is_interrupted = sys_status.plan_result != spark2::PlanResult::kSuccess;
+        const bool is_error = sys_status.robot_state == spark2::RobotState::kError;
+        is_interrupted = sys_status.plan_result != spark2::PlanResult::kSuccess || is_error;
+        if (!is_idle && !is_error) {
+            seen_busy = true;
+        }
         std::cout <<"---------------------------------------------------------------\n";
-        if (elapsed_time_ms == timeout * 1000 || is_idle) break;
+
+        const bool timed_out = elapsed_time_ms >= static_cast<int>(timeout * 1000);
+        const bool finished_after_motion = is_idle && seen_busy;
+        const bool failed_while_idle = is_idle && is_interrupted;
+        const bool finished_instantly = is_idle && elapsed_time_ms >= idle_exit_grace_ms;
+        if (timed_out || finished_after_motion || failed_while_idle || finished_instantly || is_error) {
+            break;
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(dt_ms));
         elapsed_time_ms += dt_ms;
     }
@@ -115,6 +130,8 @@ int main(int argc, char *argv[]){
     std::cout <<"Press any key to START REPLAY...\n";
     waitForKeyPress();
     robot.startPlayback();
+    prefix_text = "==> Playback\n";
+    printFeedback(robot, print_dt, timeout, &current_joint_pos, nullptr, prefix_text);
 
     //----------------------------Stop Playback---------------------------
     std::cout <<"Press any key to STOP REPLAY...\n";

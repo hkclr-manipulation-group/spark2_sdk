@@ -17,6 +17,7 @@ PYBIND11_MODULE(_spark2_sdk_cpp, m) {
         .value("CUBIC", spark2::SmoothingMethod::kCubic)
         .value("QUINTIC", spark2::SmoothingMethod::kQuintic)
         .value("NONE", spark2::SmoothingMethod::kNone)
+        .value("QUINTIC_PATH", spark2::SmoothingMethod::kQuinticPath)
         .export_values();
 
     py::enum_<spark2::RobotState>(m, "RobotStateInternal")
@@ -62,7 +63,21 @@ PYBIND11_MODULE(_spark2_sdk_cpp, m) {
     diag.attr("FAULT_ARM_NOT_FOUND") = spark2::DiagnosticFlags::kFaultArmNotFound;
     diag.attr("FAULT_GRIPPER_NOT_FOUND") = spark2::DiagnosticFlags::kFaultGripperNotFound;
     diag.attr("FAULT_HARDWARE_INIT_FAILED") = spark2::DiagnosticFlags::kFaultHardwareInitFailed;
+    diag.attr("FAULT_ARM_SIZE_MISMATCH") = spark2::DiagnosticFlags::kFaultArmSizeMismatch;
+    diag.attr("FAULT_GRIPPER_SIZE_MISMATCH") = spark2::DiagnosticFlags::kFaultGripperSizeMismatch;
+    diag.attr("FAULT_ARM_JOINT_SIZE_MISMATCH") = spark2::DiagnosticFlags::kFaultArmJointSizeMismatch;
+    diag.attr("FAULT_GRIPPER_JOINT_SIZE_MISMATCH") = spark2::DiagnosticFlags::kFaultGripperJointSizeMismatch;
+    diag.attr("FAULT_ROBOT_NAME_MISMATCH") = spark2::DiagnosticFlags::kFaultRobotNameMismatch;
+    diag.attr("FAULT_COLLISION_DETECTED") = spark2::DiagnosticFlags::kFaultCollisionDetected;
+    diag.attr("FAULT_RECOVERY_REQUIRED") = spark2::DiagnosticFlags::kFaultRecoveryRequired;
     diag.attr("FAULT_UNKNOWN") = spark2::DiagnosticFlags::kFaultUnknown;
+    diag.attr("INVALID_CONTROL_TYPE_COMBINATION") = spark2::DiagnosticFlags::kInvalidControlTypeCombination;
+    diag.attr("CARTESIAN_CONTROL_REQUIRE_POSITION_TARGET") = spark2::DiagnosticFlags::kCartesianControlRequirePositionTarget;
+    diag.attr("CONTROL_STRATEGY_NOT_AVAILABLE") = spark2::DiagnosticFlags::kControlStrategyNotAvailable;
+    diag.attr("WAYPOINT_CONTROL_STRATEGY_NOT_ALLOWED") = spark2::DiagnosticFlags::kWaypointControlStrategyNotAllowed;
+    diag.attr("WAYPOINT_TARGET_TYPE_NOT_ALLOWED") = spark2::DiagnosticFlags::kWaypointTargetTypeNotAllowed;
+    diag.attr("PLAYBACK_CONTROL_REQUIRE_POSITION_TARGET") = spark2::DiagnosticFlags::kPlaybackControlRequirePositionTarget;
+    diag.attr("UNKNOWN") = spark2::DiagnosticFlags::kUnknown;
 
     py::class_<spark2::Quaternion>(m, "QuaternionInternal")
         .def(py::init([](float w, float x, float y, float z) {
@@ -161,7 +176,7 @@ PYBIND11_MODULE(_spark2_sdk_cpp, m) {
         .def(py::init([](
             spark2::RobotState robot_state,
             spark2::PlanResult plan_result,
-            uint32_t robot_diagnostic_flags,
+            uint64_t robot_diagnostic_flags,
             const spark2::JointState6u &arm_joint_diagnostic_flags,
             const spark2::JointState1u &gripper_joint_diagnostic_flags
         ) {
@@ -175,7 +190,7 @@ PYBIND11_MODULE(_spark2_sdk_cpp, m) {
         }),
             py::arg("robot_state") = spark2::RobotState::kStartup,
             py::arg("plan_result") = spark2::PlanResult::kSuccess,
-            py::arg("robot_diagnostic_flags") = 0u,
+            py::arg("robot_diagnostic_flags") = uint64_t{0},
             py::arg("arm_joint_diagnostic_flags") = spark2::JointState6u{},
             py::arg("gripper_joint_diagnostic_flags") = spark2::JointState1u{})
         .def_readwrite("robot_state", &spark2::SystemStatus::robot_state)

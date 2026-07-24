@@ -1,6 +1,7 @@
 import os
 import sys
 import platform
+import ctypes
 
 # Get the absolute path of the spark2_sdk package directory
 _current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -28,11 +29,26 @@ elif "linux" in _system:
 
 _binary_dir = os.path.join(_current_dir, "lib", _platform_name, _toolchain)
 
-if "windows" in _system and os.path.isdir(_binary_dir):
-    os.add_dll_directory(_binary_dir)
+if not os.path.isdir(_binary_dir):
+    raise ImportError(
+        f"Spark2 native library directory not found: {_binary_dir}\n"
+        "Rebuild the C++ SDK with BUILD_PYTHON_LIB=ON, or install a matching wheel."
+    )
 
-if os.path.isdir(_binary_dir) and _binary_dir not in sys.path:
+# Make the extension module importable without PYTHONPATH hacks.
+if _binary_dir not in sys.path:
     sys.path.insert(0, _binary_dir)
+
+# Resolve libspark2_sdk next to the extension (no LD_LIBRARY_PATH required).
+if "windows" in _system:
+    os.add_dll_directory(_binary_dir)
+    _engine = os.path.join(_binary_dir, "spark2_sdk.dll")
+    if os.path.isfile(_engine):
+        ctypes.WinDLL(_engine)
+else:
+    _engine = os.path.join(_binary_dir, "libspark2_sdk.so")
+    if os.path.isfile(_engine):
+        ctypes.CDLL(_engine, mode=ctypes.RTLD_GLOBAL)
 
 # Import the wrapper classes
 from .spark2 import Spark2
@@ -41,7 +57,8 @@ from .kinematics import Kinematics
 from .types import *
 from . import types
 
-del os, sys, platform, _current_dir, _machine, _system, _platform_name, _toolchain, _binary_dir
-if '_sys_ver' in locals(): del _sys_ver
+del os, sys, platform, ctypes, _current_dir, _machine, _system, _platform_name, _toolchain, _binary_dir, _engine
+if '_sys_ver' in locals():
+    del _sys_ver
 
 __all__ = ["Spark2", "Configurator", "Kinematics"] + getattr(types, "__all__", [])

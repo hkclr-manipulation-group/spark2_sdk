@@ -27,6 +27,7 @@ class SmoothingMethod(Enum):
     CUBIC = 2
     QUINTIC = 3
     NONE = 4
+    QUINTIC_PATH = 5  # Required for multi-waypoint Path APIs
 
 
 class RobotState(Enum):

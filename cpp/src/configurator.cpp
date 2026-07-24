@@ -1,25 +1,26 @@
 #include "configurator.h"
 #include "configurator_impl.h"
 
-#include <iostream>
-#include "robot_platform_utils/cpp/include/cuarm_message_handler.h"
-#include "robot_platform_utils/cpp/include/cuarm_state.h"
+#include <cmath>
+#include <stdexcept>
+
+#include "types.h"
 
 namespace spark2{
 //--------------------------------- Configurator::Impl ---------------------------------
     void Configurator::Impl::registerCallback(
-        std::function<PanelCommand&()> getPanelCommand, 
-        std::function<PlannerState&()> getPlannerState, 
-        std::function<void()> sendPanelCommand,
+        std::function<robot::platform::SdkConfigReq&()> getConfigReq,
+        std::function<const robot::platform::SdkConfigRes&()> getConfigRes,
+        std::function<void()> sendConfig,
         std::function<bool()> isRobotStarted){
-        get_panel_command_callback_ = getPanelCommand;
-        get_planner_state_callback_ = getPlannerState;
-        send_panel_command_callback_ = sendPanelCommand;
-        is_robot_started_callback_ = isRobotStarted;
+        get_config_req_callback_ = std::move(getConfigReq);
+        get_config_res_callback_ = std::move(getConfigRes);
+        send_config_callback_ = std::move(sendConfig);
+        is_robot_started_callback_ = std::move(isRobotStarted);
     }
 
     void Configurator::Impl::ensureRobotStarted(){
-        if (!get_panel_command_callback_ || !get_planner_state_callback_ || !send_panel_command_callback_ || !is_robot_started_callback_){
+        if (!get_config_req_callback_ || !get_config_res_callback_ || !send_config_callback_ || !is_robot_started_callback_){
             throw std::runtime_error("Configurator::ensureRobotStarted failed: registerCallback hasn't been called");
         }
 
@@ -34,165 +35,169 @@ namespace spark2{
 
     void Configurator::setToolOffset(const Position& offset){
         pimpl_->ensureRobotStarted();
-        PanelCommand& panel_command = pimpl_->get_panel_command_callback_();
-        panel_command.tool_offset[pimpl_->arm_i_][0] = offset.x;
-        panel_command.tool_offset[pimpl_->arm_i_][1] = offset.y;
-        panel_command.tool_offset[pimpl_->arm_i_][2] = offset.z;
-        pimpl_->send_panel_command_callback_();
+        auto& config_req = pimpl_->get_config_req_callback_();
+        config_req.payload.arm[pimpl_->arm_i_].tool_offset = robot::platform::PositionTarget{offset.x, offset.y, offset.z};
+        config_req.payload.read_only = 0;
+        pimpl_->send_config_callback_();
     }
 
     void Configurator::setArmPosLimits(const JointLimits6f& limit){
         pimpl_->ensureRobotStarted();
-        PanelCommand& panel_command = pimpl_->get_panel_command_callback_();
-        for (int j=0; j<pimpl_->arm_joint_size_; j++){
-            panel_command.arm_soft_limit_position_deg[pimpl_->arm_i_][j][0] = limit[j].min;
-            panel_command.arm_soft_limit_position_deg[pimpl_->arm_i_][j][1] = limit[j].max;
+        auto& config_req = pimpl_->get_config_req_callback_();
+        auto& arm_cfg = config_req.payload.arm[pimpl_->arm_i_];
+        for (int j = 0; j < pimpl_->arm_joint_size_; j++){
+            arm_cfg.soft_limit_position[j][0] = limit[j].min * kDegToRad;
+            arm_cfg.soft_limit_position[j][1] = limit[j].max * kDegToRad;
         }
-        pimpl_->send_panel_command_callback_();
+        config_req.payload.read_only = 0;
+        pimpl_->send_config_callback_();
     }
 
     void Configurator::setArmVelLimits(const JointLimits6f& limit){
         pimpl_->ensureRobotStarted();
-        PanelCommand& panel_command = pimpl_->get_panel_command_callback_();
-        for (int j=0; j<pimpl_->arm_joint_size_; j++){
-            panel_command.arm_soft_limit_velocity_deg[pimpl_->arm_i_][j][0] = limit[j].min;
-            panel_command.arm_soft_limit_velocity_deg[pimpl_->arm_i_][j][1] = limit[j].max;
+        auto& config_req = pimpl_->get_config_req_callback_();
+        auto& arm_cfg = config_req.payload.arm[pimpl_->arm_i_];
+        for (int j = 0; j < pimpl_->arm_joint_size_; j++){
+            const float abs_min = std::abs(limit[j].min);
+            const float abs_max = std::abs(limit[j].max);
+            arm_cfg.soft_limit_velocity[j] = std::max(abs_min, abs_max) * kDegToRad;
         }
-        pimpl_->send_panel_command_callback_();
+        config_req.payload.read_only = 0;
+        pimpl_->send_config_callback_();
     }
 
     void Configurator::setGripperPosLimits(const JointLimits1f& limit){
         pimpl_->ensureRobotStarted();
-        PanelCommand& panel_command = pimpl_->get_panel_command_callback_();
-        for (int j=0; j<pimpl_->gripper_joint_size_; j++){
-            panel_command.gripper_soft_limit_position_deg[pimpl_->gripper_i_][j][0] = limit[j].min;
-            panel_command.gripper_soft_limit_position_deg[pimpl_->gripper_i_][j][1] = limit[j].max;
+        auto& config_req = pimpl_->get_config_req_callback_();
+        for (int j = 0; j < pimpl_->gripper_joint_size_; j++){
+            config_req.payload.gripper[pimpl_->gripper_i_].soft_limit_position[j][0] = limit[j].min * kDegToRad;
+            config_req.payload.gripper[pimpl_->gripper_i_].soft_limit_position[j][1] = limit[j].max * kDegToRad;
         }
-        pimpl_->send_panel_command_callback_();
+        config_req.payload.read_only = 0;
+        pimpl_->send_config_callback_();
     }
 
     Position Configurator::getToolOffset() const{
         pimpl_->ensureRobotStarted();
-        PlannerState& planner_state = pimpl_->get_planner_state_callback_();
-        Position pos;
-        pos.x = planner_state.tool_offset[pimpl_->arm_i_][0];
-        pos.y = planner_state.tool_offset[pimpl_->arm_i_][1];
-        pos.z = planner_state.tool_offset[pimpl_->arm_i_][2];
-        return pos;
+        const auto& config_res = pimpl_->get_config_res_callback_();
+        const auto& offset = config_res.payload.arm[pimpl_->arm_i_].tool_offset;
+        return Position{offset.x, offset.y, offset.z};
     }
 
     JointLimits6f Configurator::getArmPosLimits() const{
         pimpl_->ensureRobotStarted();
-        PlannerState& planner_state = pimpl_->get_planner_state_callback_();
-        JointLimits6f limits;
-        for (int j=0; j<pimpl_->arm_joint_size_; j++){
-            limits[j].min = planner_state.arm_soft_limit_position[pimpl_->arm_i_][j][0];
-            limits[j].max = planner_state.arm_soft_limit_position[pimpl_->arm_i_][j][1];
+        const auto& config_res = pimpl_->get_config_res_callback_();
+        JointLimits6f limits{};
+        for (int j = 0; j < pimpl_->arm_joint_size_; j++){
+            limits[j].min = config_res.payload.arm[pimpl_->arm_i_].soft_limit_position[j][0] * kRadToDeg;
+            limits[j].max = config_res.payload.arm[pimpl_->arm_i_].soft_limit_position[j][1] * kRadToDeg;
         }
         return limits;
     }
 
     JointLimits6f Configurator::getArmVelLimits() const{
         pimpl_->ensureRobotStarted();
-        PlannerState& planner_state = pimpl_->get_planner_state_callback_();
-        JointLimits6f limits;
-        for (int j=0; j<pimpl_->arm_joint_size_; j++){
-            limits[j].min = planner_state.arm_soft_limit_velocity[pimpl_->arm_i_][j][0];
-            limits[j].max = planner_state.arm_soft_limit_velocity[pimpl_->arm_i_][j][1];
+        const auto& config_res = pimpl_->get_config_res_callback_();
+        JointLimits6f limits{};
+        for (int j = 0; j < pimpl_->arm_joint_size_; j++){
+            const float v = config_res.payload.arm[pimpl_->arm_i_].soft_limit_velocity[j] * kRadToDeg;
+            limits[j].min = -v;
+            limits[j].max = v;
         }
         return limits;
     }
 
     JointLimits6f Configurator::getArmMaxPos() const{
         pimpl_->ensureRobotStarted();
-        PlannerState& planner_state = pimpl_->get_planner_state_callback_();
-        JointLimits6f limits;
-        for (int j=0; j<pimpl_->arm_joint_size_; j++){
-            limits[j].min = planner_state.arm_hard_limit_position[pimpl_->arm_i_][j][0];
-            limits[j].max = planner_state.arm_hard_limit_position[pimpl_->arm_i_][j][1];
+        const auto& config_res = pimpl_->get_config_res_callback_();
+        JointLimits6f limits{};
+        for (int j = 0; j < pimpl_->arm_joint_size_; j++){
+            limits[j].min = config_res.payload.arm[pimpl_->arm_i_].hard_limit_position[j][0] * kRadToDeg;
+            limits[j].max = config_res.payload.arm[pimpl_->arm_i_].hard_limit_position[j][1] * kRadToDeg;
         }
         return limits;
     }
 
     JointLimits6f Configurator::getArmMaxVel() const{
         pimpl_->ensureRobotStarted();
-        PlannerState& planner_state = pimpl_->get_planner_state_callback_();
-        JointLimits6f limits;
-        for (int j=0; j<pimpl_->arm_joint_size_; j++){
-            limits[j].min = planner_state.arm_hard_limit_velocity[pimpl_->arm_i_][j][0];
-            limits[j].max = planner_state.arm_hard_limit_velocity[pimpl_->arm_i_][j][1];
+        const auto& config_res = pimpl_->get_config_res_callback_();
+        JointLimits6f limits{};
+        for (int j = 0; j < pimpl_->arm_joint_size_; j++){
+            const float v = config_res.payload.arm[pimpl_->arm_i_].hard_limit_velocity[j] * kRadToDeg;
+            limits[j].min = -v;
+            limits[j].max = v;
         }
         return limits;
     }
 
     JointState6f Configurator::getArmMaxPosJump() const{
         pimpl_->ensureRobotStarted();
-        PlannerState& planner_state = pimpl_->get_planner_state_callback_();
-        JointState6f state;
-        for (int j=0; j<pimpl_->arm_joint_size_; j++){
-            state[j] = planner_state.arm_jump_limit_position[pimpl_->arm_i_][j];
+        const auto& config_res = pimpl_->get_config_res_callback_();
+        JointState6f state{};
+        for (int j = 0; j < pimpl_->arm_joint_size_; j++){
+            state[j] = config_res.payload.arm[pimpl_->arm_i_].jump_limit_position[j] * kRadToDeg;
         }
         return state;
     }
 
     JointState6f Configurator::getArmMaxVelJump() const{
         pimpl_->ensureRobotStarted();
-        PlannerState& planner_state = pimpl_->get_planner_state_callback_();
-        JointState6f state;
-        for (int j=0; j<pimpl_->arm_joint_size_; j++){
-            state[j] = planner_state.arm_jump_limit_velocity[pimpl_->arm_i_][j];
+        const auto& config_res = pimpl_->get_config_res_callback_();
+        JointState6f state{};
+        for (int j = 0; j < pimpl_->arm_joint_size_; j++){
+            state[j] = config_res.payload.arm[pimpl_->arm_i_].jump_limit_velocity[j] * kRadToDeg;
         }
         return state;
     }
 
     JointState6f Configurator::getArmMaxPosFollowError() const{
         pimpl_->ensureRobotStarted();
-        PlannerState& planner_state = pimpl_->get_planner_state_callback_();
-        JointState6f state;
-        for (int j=0; j<pimpl_->arm_joint_size_; j++){
-            state[j] = planner_state.arm_follow_limit_position[pimpl_->arm_i_][j];
+        const auto& config_res = pimpl_->get_config_res_callback_();
+        JointState6f state{};
+        for (int j = 0; j < pimpl_->arm_joint_size_; j++){
+            state[j] = config_res.payload.arm[pimpl_->arm_i_].follow_limit_position[j] * kRadToDeg;
         }
         return state;
     }
 
     JointState6f Configurator::getArmMaxVelFollowError() const{
         pimpl_->ensureRobotStarted();
-        PlannerState& planner_state = pimpl_->get_planner_state_callback_();
-        JointState6f state;
-        for (int j=0; j<pimpl_->arm_joint_size_; j++){
-            state[j] = planner_state.arm_follow_limit_velocity[pimpl_->arm_i_][j];
+        const auto& config_res = pimpl_->get_config_res_callback_();
+        JointState6f state{};
+        for (int j = 0; j < pimpl_->arm_joint_size_; j++){
+            state[j] = config_res.payload.arm[pimpl_->arm_i_].follow_limit_velocity[j] * kRadToDeg;
         }
         return state;
     }
 
     JointState6f Configurator::getArmMaxTorFollowError() const{
         pimpl_->ensureRobotStarted();
-        PlannerState& planner_state = pimpl_->get_planner_state_callback_();
-        JointState6f state;
-        for (int j=0; j<pimpl_->arm_joint_size_; j++){
-            state[j] = planner_state.arm_follow_limit_torque[pimpl_->arm_i_][j];
+        const auto& config_res = pimpl_->get_config_res_callback_();
+        JointState6f state{};
+        for (int j = 0; j < pimpl_->arm_joint_size_; j++){
+            state[j] = config_res.payload.arm[pimpl_->arm_i_].follow_limit_torque[j];
         }
         return state;
     }
 
     JointLimits1f Configurator::getGripperPosLimits() const{
         pimpl_->ensureRobotStarted();
-        PlannerState& planner_state = pimpl_->get_planner_state_callback_();
-        JointLimits1f limits;
-        for (int j=0; j<pimpl_->gripper_joint_size_; j++){
-            limits[j].min = planner_state.gripper_soft_limit_position[pimpl_->gripper_i_][j][0];
-            limits[j].max = planner_state.gripper_soft_limit_position[pimpl_->gripper_i_][j][1];
+        const auto& config_res = pimpl_->get_config_res_callback_();
+        JointLimits1f limits{};
+        for (int j = 0; j < pimpl_->gripper_joint_size_; j++){
+            limits[j].min = config_res.payload.gripper[pimpl_->gripper_i_].soft_limit_position[j][0] * kRadToDeg;
+            limits[j].max = config_res.payload.gripper[pimpl_->gripper_i_].soft_limit_position[j][1] * kRadToDeg;
         }
         return limits;
     }
 
     JointLimits1f Configurator::getGripperMaxPos() const{
         pimpl_->ensureRobotStarted();
-        PlannerState& planner_state = pimpl_->get_planner_state_callback_();
-        JointLimits1f limits;
-        for (int j=0; j<pimpl_->gripper_joint_size_; j++){
-            limits[j].min = planner_state.gripper_hard_limit_position[pimpl_->gripper_i_][j][0];
-            limits[j].max = planner_state.gripper_hard_limit_position[pimpl_->gripper_i_][j][1];
+        const auto& config_res = pimpl_->get_config_res_callback_();
+        JointLimits1f limits{};
+        for (int j = 0; j < pimpl_->gripper_joint_size_; j++){
+            limits[j].min = config_res.payload.gripper[pimpl_->gripper_i_].hard_limit_position[j][0] * kRadToDeg;
+            limits[j].max = config_res.payload.gripper[pimpl_->gripper_i_].hard_limit_position[j][1] * kRadToDeg;
         }
         return limits;
     }

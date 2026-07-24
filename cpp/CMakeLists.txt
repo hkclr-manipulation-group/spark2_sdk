@@ -50,13 +50,45 @@ set(CPP_INSTALL_PATH "lib/${PLATFORM_NAME}/${TOOLCHAIN_VARIANT}")
 ###################################Build Switches###########################################
 option(BUILD_PYTHON_LIB "Build Python library" ON)
 
-###################################Add subdirectory#################################################
-cmake_path(GET PROJECT_SOURCE_DIR PARENT_PATH PARENT_DIR)
-cmake_path(GET PARENT_DIR PARENT_PATH GRANDPARENT_DIR )
-set (CONFIG_PATH ${GRANDPARENT_DIR}/cuarm_configuration/spark2_v1)
+###################################Repo layout##############################################
+# cpp/ is PROJECT_SOURCE_DIR; parent is the SDK repo root (configuration/, examples dist).
+# Dependencies may be either:
+#   A) Nested under SDK_ROOT (standalone spark2_sdk package), or
+#   B) Siblings of spark2_sdk (workspace: spark2_control/cuarm_panel_control).
+cmake_path(GET PROJECT_SOURCE_DIR PARENT_PATH SDK_ROOT)
+cmake_path(GET SDK_ROOT PARENT_PATH WORKSPACE_ROOT)
+set(CONFIG_PATH "${SDK_ROOT}/configuration")
+
+if(EXISTS "${SDK_ROOT}/cuarm_rt_control/cuarm_robotics")
+    set(RT_CONTROL_DIR "${SDK_ROOT}/cuarm_rt_control")
+elseif(EXISTS "${WORKSPACE_ROOT}/cuarm_rt_control/cuarm_robotics")
+    set(RT_CONTROL_DIR "${WORKSPACE_ROOT}/cuarm_rt_control")
+else()
+    message(FATAL_ERROR
+        "Cannot find cuarm_rt_control/cuarm_robotics under:\n"
+        "  ${SDK_ROOT}\n"
+        "  ${WORKSPACE_ROOT}\n"
+        "Place it as a sibling of spark2_sdk or nested under the SDK root.")
+endif()
+set(CUARM_ROBOTICS_DIR "${RT_CONTROL_DIR}/cuarm_robotics")
+
+# robot_platform_utils expects curi_udp/curi_tcp as siblings of its parent directory.
+if(EXISTS "${SDK_ROOT}/robot_platform_utils")
+    set(_PLATFORM_UTILS_PARENT "${SDK_ROOT}")
+elseif(EXISTS "${WORKSPACE_ROOT}/robot_platform_utils")
+    set(_PLATFORM_UTILS_PARENT "${WORKSPACE_ROOT}")
+else()
+    message(FATAL_ERROR
+        "Cannot find robot_platform_utils under ${SDK_ROOT} or ${WORKSPACE_ROOT}")
+endif()
+set(ROBOT_PLATFORM_UTILS_DIR "${_PLATFORM_UTILS_PARENT}" CACHE PATH "Path containing robot_platform_utils/" FORCE)
+set(ROBOT_PLATFORM_UTILS_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}" CACHE PATH "Binary dir for robot_platform_utils" FORCE)
+message(STATUS "SDK_ROOT: ${SDK_ROOT}")
+message(STATUS "RT_CONTROL_DIR: ${RT_CONTROL_DIR}")
+message(STATUS "ROBOT_PLATFORM_UTILS_DIR: ${ROBOT_PLATFORM_UTILS_DIR}")
 
 #Find the pre-compiled robotics library first
-set(LIB_SEARCH_DIR ${GRANDPARENT_DIR}/cuarm_rt_control/build)
+set(LIB_SEARCH_DIR ${RT_CONTROL_DIR}/build)
 find_library(ROBOTICS_LIB_FILE
     NAMES robotics_lib
     PATHS ${LIB_SEARCH_DIR}/cuarm_robotics
@@ -71,9 +103,7 @@ if(NOT ROBOTICS_LIB_FILE)
         set(CMAKE_PREFIX_PATH "${CLEAN_PREFIX_PATH}")
     endif()
 
-    set(ROBOT_PLATFORM_UTILS_DIR "${GRANDPARENT_DIR}" CACHE PATH "Path to the utils repository")
-    set(ROBOT_PLATFORM_UTILS_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}" CACHE PATH "Path to the utils repository binary directory")
-    add_subdirectory(${GRANDPARENT_DIR}/cuarm_rt_control/cuarm_robotics ${CMAKE_BINARY_DIR}/cuarm_robotics)
+    add_subdirectory(${CUARM_ROBOTICS_DIR} ${CMAKE_BINARY_DIR}/cuarm_robotics)
 else()
     message(STATUS "Found pre-compiled robotics: ${ROBOTICS_LIB_FILE}")
     find_library(UTILS_FILE
@@ -98,24 +128,30 @@ else()
     find_package(yaml-cpp REQUIRED)
     find_package(Eigen3 REQUIRED)
     find_package(Boost REQUIRED)
+    find_package(OpenSSL REQUIRED)
+    if(ROBOTICS_STATIC)
+        find_package(console_bridge REQUIRED)
+        find_package(tinyxml2 REQUIRED)
+    endif()
     add_library(cuarm_robotics::robotics STATIC IMPORTED GLOBAL)
     set_target_properties(cuarm_robotics::robotics PROPERTIES
         IMPORTED_LOCATION "${ROBOTICS_LIB_FILE}"
-        INTERFACE_INCLUDE_DIRECTORIES "${GRANDPARENT_DIR}/cuarm_rt_control;${GRANDPARENT_DIR}/cuarm_rt_control/cuarm_robotics/src;${GRANDPARENT_DIR}/robot_platform_utils/cpp/include;${EIGEN3_INCLUDE_DIRS};${Boost_INCLUDE_DIRS};${PINOCCHIO_INCLUDE_DIRS}"
+        INTERFACE_INCLUDE_DIRECTORIES "${RT_CONTROL_DIR};${CUARM_ROBOTICS_DIR}/src;${ROBOT_PLATFORM_UTILS_DIR}/robot_platform_utils/cpp/include;${ROBOT_PLATFORM_UTILS_DIR};${EIGEN3_INCLUDE_DIRS};${Boost_INCLUDE_DIRS};${PINOCCHIO_INCLUDE_DIRS}"
     )
 
     set_property(TARGET cuarm_robotics::robotics PROPERTY INTERFACE_COMPILE_DEFINITIONS
-        "EIGEN_QUATERNIONBASE_PLUGIN=\"${GRANDPARENT_DIR}/cuarm_rt_control/cuarm_robotics/src/3rd_party/Eigen_QuaternionBase_Plugin.hpp\""
-        "EIGEN_MATRIX_PLUGIN=\"${GRANDPARENT_DIR}/cuarm_rt_control/cuarm_robotics/src/3rd_party/Matrix_initializer_list.h\""
+        "EIGEN_QUATERNIONBASE_PLUGIN=\"${CUARM_ROBOTICS_DIR}/src/3rd_party/Eigen_QuaternionBase_Plugin.hpp\""
+        "EIGEN_MATRIX_PLUGIN=\"${CUARM_ROBOTICS_DIR}/src/3rd_party/Matrix_initializer_list.h\""
     )
     target_link_libraries(cuarm_robotics::robotics INTERFACE 
         "${UTILS_FILE}"
         "${UDP_FILS}"
         "${TCP_FILE}"
         yaml-cpp::yaml-cpp
+        OpenSSL::Crypto
         ${EIGEN3_LIBRARIES}
         ${Boost_LIBRARIES}
-        ${PINOCCHIO_LIBRARIES}
+        pinocchio::pinocchio
     )
 endif()
 
@@ -135,14 +171,20 @@ target_include_directories(spark2_sdk PUBLIC
     ${PROJECT_SOURCE_DIR}/include
 )
 
+# Workspace root so includes like "robot_platform_utils/cpp/include/..." resolve;
+# also expose cuarm_rt_control for robotics headers used by kinematics.
 target_include_directories(spark2_sdk PRIVATE
-    ${GRANDPARENT_DIR}
-    ${GRANDPARENT_DIR}/cuarm_rt_control
+    ${ROBOT_PLATFORM_UTILS_DIR}
+    ${RT_CONTROL_DIR}
 )
 
 target_link_libraries(spark2_sdk PRIVATE
     cuarm_robotics::robotics
 )
+
+if(WIN32)
+    target_link_libraries(spark2_sdk PRIVATE ws2_32 crypt32)
+endif()
 
 ###################################Generate Python Library######################################
 if(BUILD_PYTHON_LIB)
@@ -171,12 +213,15 @@ if(BUILD_PYTHON_LIB)
     )
     set_target_properties(_spark2_sdk_cpp PROPERTIES
         LIBRARY_OUTPUT_DIRECTORY "${PYTHON_LIB_PATH}"
-    )
-    set_target_properties(_spark2_sdk_cpp PROPERTIES
         LIBRARY_OUTPUT_DIRECTORY_RELEASE "${PYTHON_LIB_PATH}"
         LIBRARY_OUTPUT_DIRECTORY_DEBUG   "${PYTHON_LIB_PATH}"
         LIBRARY_OUTPUT_DIRECTORY_MINSIZEREL "${PYTHON_LIB_PATH}"
         LIBRARY_OUTPUT_DIRECTORY_RELWITHDEBINFO "${PYTHON_LIB_PATH}"
+        # Find sibling libspark2_sdk.so / spark2_sdk.dll without LD_LIBRARY_PATH.
+        BUILD_RPATH "\$ORIGIN"
+        INSTALL_RPATH "\$ORIGIN"
+        BUILD_WITH_INSTALL_RPATH TRUE
+        SKIP_BUILD_RPATH FALSE
     )
 
     add_custom_command(TARGET _spark2_sdk_cpp POST_BUILD
@@ -232,9 +277,13 @@ else()
     )
 endif()
 
-install(DIRECTORY "${PROJECT_SOURCE_DIR}/include/"
+# Public SDK API headers shipped in spark2_cpp_dist.
+install(FILES
+    "${PROJECT_SOURCE_DIR}/include/spark2.h"
+    "${PROJECT_SOURCE_DIR}/include/types.h"
+    "${PROJECT_SOURCE_DIR}/include/kinematics.h"
+    "${PROJECT_SOURCE_DIR}/include/configurator.h"
     DESTINATION "${DIST_OUTPUT_DIR}/include"
-    FILES_MATCHING PATTERN "*.h"
 )
 
 install(DIRECTORY "${PROJECT_SOURCE_DIR}/examples/"

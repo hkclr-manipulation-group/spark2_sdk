@@ -1,5 +1,6 @@
 [build-system]
-requires = ["setuptools>=61.0.0", "wheel"]
+# >=64: PEP 660 editable; <80: stays compatible with colcon-core
+requires = ["setuptools>=64,<80", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -13,5 +14,5 @@ requires-python = ">=3.8"
 packages = ["spark2_sdk"]
 
 [tool.setuptools.package-data]
-# Crucial: Force Python to include the pre-built binary inside the package
-spark2_sdk = ["lib/x86/*.so", "lib/arm64/*.so"]
+# Native extension + engine lib under lib/<platform>/<toolchain>/
+spark2_sdk = ["lib/**/*"]

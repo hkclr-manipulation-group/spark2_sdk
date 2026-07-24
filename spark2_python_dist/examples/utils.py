@@ -20,6 +20,9 @@ def print_feedback(
 ) -> None:
     elapsed_time = 0.0
     interval = dt
+    # Avoid treating the previous command's Idle as "motion finished" on the first poll.
+    idle_exit_grace = max(interval, 0.3)
+    seen_busy = False
     is_idle = False
     is_interrupted = False
 
@@ -45,10 +48,17 @@ def print_feedback(
         sys_status = arm.get_status()
         arm.print_status(sys_status)
         is_idle = sys_status.robot_state == RobotState.IDLE
-        is_interrupted = sys_status.plan_result != PlanResult.SUCCESS
+        is_error = sys_status.robot_state == RobotState.ERROR
+        is_interrupted = sys_status.plan_result != PlanResult.SUCCESS or is_error
+        if not is_idle and not is_error:
+            seen_busy = True
         print("---------------------------------------------------------------")
 
-        if elapsed_time >= timeout or is_idle:
+        timed_out = elapsed_time >= timeout
+        finished_after_motion = is_idle and seen_busy
+        failed_while_idle = is_idle and is_interrupted
+        finished_instantly = is_idle and elapsed_time >= idle_exit_grace
+        if timed_out or finished_after_motion or failed_while_idle or finished_instantly or is_error:
             break
 
         time.sleep(interval)

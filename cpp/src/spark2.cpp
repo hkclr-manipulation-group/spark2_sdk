@@ -1,953 +1,1155 @@
 #include "spark2.h"
 
-#include <algorithm> // Required for std::clamp
-#include <filesystem>
-#include <memory>
+#include <algorithm>
+#include <atomic>
 #include <chrono>
-#include <thread>
-#include <mutex>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <filesystem>
 #include <functional>
+#include <iostream>
+#include <memory>
+#include <mutex>
+#include <stdexcept>
+#include <string>
+#include <thread>
+#include <variant>
+#include <vector>
 
+#include "robot_platform_utils/cpp/include/client_keys.h"
 #include "robot_platform_utils/cpp/include/config_loader.h"
-#include "robot_platform_utils/cpp/include/cuarm_state.h"
 #include "robot_platform_utils/cpp/include/cuarm_udp.h"
+#include "robot_platform_utils/cpp/include/mcast_client.h"
+#include "robot_platform_utils/cpp/include/mcast_server_discovery.h"
+#include "robot_platform_utils/cpp/include/platform_serialization.h"
+#include "robot_platform_utils/cpp/include/platform_state.h"
 #include "robot_platform_utils/cpp/include/time_utils.h"
+
 #include "configurator_impl.h"
 #include "kinematics_impl.h"
 
 namespace spark2{
-    
-    enum class MotionMode{
-        kInitialized = 0,
-        kManual = 1,
-        kTeaching = 2,
-        kPlayback = 3,
+namespace {
+
+using robot::platform::CartesianTarget;
+using robot::platform::CommandResponseStatus;
+using robot::platform::ControlStrategy;
+using robot::platform::ControlType;
+using robot::platform::CoreRequestVariant;
+using robot::platform::CoreRequestVariantPtr;
+using robot::platform::CoreResponseVariant;
+using robot::platform::CoreResponseVariantPtr;
+using robot::platform::CuarmUdp;
+using robot::platform::FrameReference;
+using robot::platform::MonitoringRequestVariant;
+using robot::platform::MonitoringRequestVariantPtr;
+using robot::platform::PlaybackState;
+using robot::platform::PositionTarget;
+using robot::platform::SdkCommandReq;
+using robot::platform::SdkCommandRes;
+using robot::platform::SdkConfigReq;
+using robot::platform::SdkConfigRes;
+using robot::platform::SdkHandshakeReq;
+using robot::platform::SdkHeartbeatReq;
+using robot::platform::SrvState;
+using robot::platform::SystemState;
+using PlatformSmoothingMethod = robot::platform::SmoothingMethod;
+
+constexpr uint16_t kDefaultSdkClientId = 10003;
+constexpr float kAckPollMs = 10.0f;
+constexpr float kCommandAckTimeoutMs = 5000.0f;
+constexpr float kConfigAckTimeoutMs = 1000.0f;
+constexpr float kConfigExitTimeoutMs = 50000.0f;
+
+using SdkMcastClient = robot::platform::McastClient<SrvState, CoreRequestVariantPtr, CoreResponseVariantPtr>;
+using MonitoringUdp = CuarmUdp<std::monostate, MonitoringRequestVariantPtr>;
+
+bool packCoreRequest(
+    const CoreRequestVariantPtr& request,
+    std::uint8_t* buffer,
+    std::size_t buffer_size,
+    std::size_t& written_size){
+    return robot::platform::serialization::packMessage(
+        request, buffer, buffer_size, written_size, robot::platform::getClientHmacKey);
+}
+
+bool unpackSrvState(const std::uint8_t* buffer, std::size_t size, SrvState& out){
+    out = SrvState{};
+    out.magic_header = 0;
+    return robot::platform::serialization::unpackMessage(buffer, size, out, robot::platform::getClientHmacKey);
+}
+
+bool unpackCoreResponse(const std::uint8_t* buffer, std::size_t size, CoreResponseVariantPtr& out){
+    out = nullptr;
+    return robot::platform::serialization::unpackMessage(buffer, size, out, robot::platform::getClientHmacKey);
+}
+
+bool packMonitoringRequest(
+    const MonitoringRequestVariantPtr& request,
+    std::uint8_t* buffer,
+    std::size_t buffer_size,
+    std::size_t& written_size){
+    return robot::platform::serialization::packMessage(
+        request, buffer, buffer_size, written_size, robot::platform::getClientHmacKey);
+}
+
+bool isCommandAckSuccess(const CoreResponseVariantPtr& ack){
+    return ack && std::holds_alternative<SdkCommandRes>(*ack)
+        && std::get<SdkCommandRes>(*ack).payload.status == CommandResponseStatus::kSuccess;
+}
+
+bool isConfigAckSuccess(const CoreResponseVariantPtr& ack){
+    return ack && std::holds_alternative<SdkConfigRes>(*ack)
+        && std::get<SdkConfigRes>(*ack).payload.status == CommandResponseStatus::kSuccess;
+}
+
+PlatformSmoothingMethod toPlatformSmoothing(SmoothingMethod method){
+    switch (method){
+        case SmoothingMethod::kLinear: return PlatformSmoothingMethod::kLinear;
+        case SmoothingMethod::kCos: return PlatformSmoothingMethod::kCos;
+        case SmoothingMethod::kCubic: return PlatformSmoothingMethod::kCubic;
+        case SmoothingMethod::kQuintic: return PlatformSmoothingMethod::kQuintic;
+        case SmoothingMethod::kNone: return PlatformSmoothingMethod::kNone;
+        case SmoothingMethod::kQuinticPath: return PlatformSmoothingMethod::kQuinticPath;
+    }
+    return PlatformSmoothingMethod::kCos;
+}
+
+RobotState mapSystemState(SystemState state){
+    switch (state){
+        case SystemState::kUnknown:  return RobotState::kStartup;
+        case SystemState::kStartup:  return RobotState::kStartup;
+        case SystemState::kIdle:     return RobotState::kIdle;
+        case SystemState::kMoving:   return RobotState::kMoving;
+        case SystemState::kSettling: return RobotState::kSettling;
+        case SystemState::kError:    return RobotState::kError;
+        case SystemState::kRecovery: return RobotState::kRecovery;
+        case SystemState::kShutdown: return RobotState::kShutdown;
+    }
+    return RobotState::kStartup;
+}
+
+Pose poseFromCartesian(const CartesianTarget& c){
+    Pose pose;
+    pose.position = Position{c.x, c.y, c.z};
+    pose.orientation = Quaternion{c.qw, c.qx, c.qy, c.qz};
+    return pose;
+}
+
+void fillCartesianFromPose(const Pose& pose, CartesianTarget& out){
+    float pose7[7] = {
+        pose.position.x, pose.position.y, pose.position.z,
+        pose.orientation.w, pose.orientation.x, pose.orientation.y, pose.orientation.z
     };
+    robot::platform::writeCartesian(pose7, out);
+}
 
-    struct Spark2::Impl{
-        std::unique_ptr<Configurator> configurator_;
-        std::unique_ptr<Kinematics> kinematics_;
+std::string robotStateToString(RobotState state){
+    switch (state){
+        case RobotState::kStartup: return "Startup";
+        case RobotState::kIdle: return "Idle";
+        case RobotState::kMoving: return "Moving";
+        case RobotState::kSettling: return "Settling";
+        case RobotState::kError: return "Error";
+        case RobotState::kRecovery: return "Recovery";
+        case RobotState::kShutdown: return "Shutdown";
+    }
+    return "Unknown";
+}
 
-        int arm_size_;
-        std::vector<int> arm_joint_size_;
-        int gripper_size_;
-        std::vector<int> gripper_joint_size_;
-        std::unique_ptr<PanelCommand> panel_command_;
-        std::unique_ptr<PlannerState> planner_state_;
-        std::unique_ptr<CuarmUdp<PlannerState, PanelCommand>> udp_;
-        std::atomic<bool> shutdown_{false};
-        std::atomic<bool> first_state_received_{false};
-        std::thread receive_thread_;
-        YAML::Node config_;
-        bool started_ = false; // True if the arm has been started
+std::string planResultToString(PlanResult result){
+    switch (result){
+        case PlanResult::kSuccess: return "Success";
+        case PlanResult::kPoseNotReachable: return "PoseNotReachable";
+        case PlanResult::kLinearPathFailed: return "LinearPathFailed";
+    }
+    return "Unknown";
+}
 
-        float receive_dt_us_;
-        float send_dt_us_;
-        ControlType initial_target_type_;
-        ControlType initial_actuator_mode_;
-        ControlType last_target_type_;
-        ControlType last_actuator_mode_;
-        ControlType actuator_mode_under_position_control_;
-        MotionControl last_motion_control_;
-        std::vector<RobotJointStatef> playback_;
-        std::mutex panel_command_mutex_;
+}  // namespace
 
+struct Spark2::Impl{
+    std::unique_ptr<Configurator> configurator_;
+    std::unique_ptr<Kinematics> kinematics_;
 
-        void initialize(const YAML::Node& config){
-            //Initialize class variables
-            panel_command_ = std::make_unique<PanelCommand>();
-            planner_state_ = std::make_unique<PlannerState>();
+    std::unique_ptr<SdkMcastClient> mcast_;
+    std::unique_ptr<MonitoringUdp> monitoring_;
 
-            arm_size_ = config["robot"]["arm"].size();
-            for (int arm_i=0; arm_i<arm_size_; arm_i++){
-                arm_joint_size_.push_back(config["robot"]["arm"][arm_i]["joint_size"].as<int>());
-            }
-            
-            if (config["robot"]["gripper"]){
-                gripper_size_ = config["robot"]["gripper"].size();
-                for (int gri_i=0; gri_i<gripper_size_; gri_i++){
-                    gripper_joint_size_.push_back(config["robot"]["gripper"][gri_i]["joint_size"].as<int>());
-                }
-            }
-            receive_dt_us_ = config["panel"]["dt_receive"].as<float>() * 1000000; // Convert to microseconds
-            send_dt_us_ = config["panel"]["dt_send"].as<float>() * 1000000; // Convert to microseconds
-            config_ = config;
+    uint16_t client_id_ = kDefaultSdkClientId;
+    uint32_t session_id_ = 0;
+    uint32_t sequence_id_ = 0;
 
-            //Initialize panel_command_
-            panel_command_->sequence_id = 0;
-            panel_command_->need_setting_update = true;
-            panel_command_->simulation = config["rt_control"]["hardware_simulation"].as<bool>();
-            panel_command_->motion_type = MotionControl::kJoint;
-            panel_command_->connection_state = ConnectionState::kRemote;
-            panel_command_->reset_control_mem = false;
-            panel_command_->reset_interpolation = false;
-            panel_command_->control_algorithm = ControlAlgorithm::kNone;
-            panel_command_->playback_cmd = PlaybackState::kStop;
-            
-            panel_command_->interpolation_type = stringToEnum<InterpolationMethod>(config["panel"]["general"]["interpolation"].as<std::string>());
-            panel_command_->InterpolationAccTime = config["panel"]["general"]["acc_time"].as<float>();
-            panel_command_->InterpolationConstVelTime = config["panel"]["general"]["vel_time"].as<float>();
-            panel_command_->NoneInterpolationSaturationRatio = config["panel"]["general"]["none_interpolation_saturation_adjust"].as<float>();
+    SdkConfigReq config_req_{};
+    SdkCommandReq cmd_req_{};
+    SdkConfigRes last_config_res_{};
+    bool have_config_res_ = false;
 
-            initial_target_type_ = stringToEnum<ControlType>(config["panel"]["general"]["target_type"].as<std::string>());
-            initial_actuator_mode_ = stringToEnum<ControlType>(config["panel"]["general"]["actuator_mode"].as<std::string>());
-            actuator_mode_under_position_control_ = (initial_target_type_ == ControlType::kPosition)? initial_actuator_mode_ : ControlType::kPosition;
-            
-            panel_command_->target_type = ControlType::kVelocity;
-            panel_command_->actuator_mode = ControlType::kVelocity;
-            last_motion_control_ = panel_command_->motion_type;
-            last_target_type_ = panel_command_->target_type;
-            last_actuator_mode_ = panel_command_->actuator_mode;
+    std::shared_ptr<SrvState> srv_state_ = std::make_shared<SrvState>();
+    std::shared_ptr<SrvState> transmit_state_;
+    std::mutex state_mutex_;
+    std::mutex send_mutex_;
 
-            panel_command_->arm_target_mode = PanelTargetMode::kSinglePoint;
-            panel_command_->ArmWaypointSize = 0;
-            panel_command_->ArmSize = arm_size_;
-            for (int arm_i=0; arm_i<arm_size_; arm_i++){
-                YAML::Node arm_node = config["robot"]["arm"][arm_i];
-                std::string arm_name = arm_node["name"].as<std::string>();
-                std::string arm_type = arm_node["type"].as<std::string>();
-                std::string robot_name = arm_name + "-" + arm_type;
-                strcpy(panel_command_->RobotName[arm_i], robot_name.c_str());
-                panel_command_->JointSize[arm_i] = arm_joint_size_[arm_i];
+    int arm_size_ = 0;
+    int gripper_size_ = 0;
+    std::vector<int> arm_joint_size_;
+    std::vector<int> gripper_joint_size_;
+    std::string robot_name_;
+    std::string config_prefix_path_;
 
-                for (int i =0; i < arm_joint_size_[arm_i]; i++){
-                    panel_command_->MotorCmdDeg[arm_i][i] = 0;
-                    panel_command_->JointCmdDeg[arm_i][i] = 0;
-                    if (i < 6)
-                        panel_command_->TaskCmdDeg[arm_i][i] = 0;
-                }
+    ControlType initial_target_type_ = ControlType::kPosition;
+    ControlType initial_actuator_mode_ = ControlType::kVelocity;
+    ControlType actuator_mode_under_position_control_ = ControlType::kVelocity;
+    PlatformSmoothingMethod default_smoothing_ = PlatformSmoothingMethod::kCos;
+    float default_acc_t_ = 0.f;
+    YAML::Node config_;
 
-                //Init joint enable state
-                for (int joint_i=0; joint_i<arm_joint_size_[arm_i]; joint_i++){
-                    bool enable = config["robot"]["arm"][arm_i]["enable_joint"][joint_i].as<bool>();
-                    panel_command_->enable_joint[arm_i][joint_i] = enable;
-                }
-            }
+    std::atomic<bool> shutdown_{false};
+    std::atomic<bool> first_state_received_{false};
+    bool started_ = false;
+    std::thread receive_thread_;
+    std::thread heartbeat_thread_;
+    float receive_dt_us_ = 10000.f;
+    float heartbeat_dt_ms_ = 10.f;
 
-            panel_command_->GripperSize = gripper_size_;
-            for (int gri_i=0; gri_i<gripper_size_; gri_i++){
-                panel_command_->GripperJointSize[gri_i] = gripper_joint_size_[gri_i];
-                for (int i=0; i < gripper_joint_size_[gri_i]; i++){
-                    panel_command_->GripperJointCmd[gri_i][i] = 0;
-                    planner_state_->GripperJointPos[gri_i][i] = 0;
-                }
-            }
-            
-            //Config setting
-            for (int arm_i=0; arm_i<arm_size_; arm_i++){
-                panel_command_->tool_offset[arm_i][0] = 0.0f; //Default tool offset is 0
-                panel_command_->tool_offset[arm_i][1] = 0.0f; //Default tool offset is 0
-                panel_command_->tool_offset[arm_i][2] = 0.0f; //Default tool offset is 0
-                for (int joint_i=0; joint_i<arm_joint_size_[arm_i]; joint_i++){
-                    panel_command_->arm_soft_limit_position_deg[arm_i][joint_i][0] = config["robot"]["arm"][arm_i]["safety"]["joint_soft_limit"]["position"][0][joint_i].as<float>();
-                    panel_command_->arm_soft_limit_position_deg[arm_i][joint_i][1] = config["robot"]["arm"][arm_i]["safety"]["joint_soft_limit"]["position"][1][joint_i].as<float>();
-                    panel_command_->arm_soft_limit_velocity_deg[arm_i][joint_i][0] = config["robot"]["arm"][arm_i]["safety"]["joint_soft_limit"]["velocity"][joint_i].as<float>() * -1.0f;
-                    panel_command_->arm_soft_limit_velocity_deg[arm_i][joint_i][1] = config["robot"]["arm"][arm_i]["safety"]["joint_soft_limit"]["velocity"][joint_i].as<float>();
-                }
-            }
-            
-            for (int gri_i=0; gri_i<gripper_size_; gri_i++){
-                panel_command_->tool_offset[gri_i][0] = config["robot"]["gripper"][gri_i]["tool_offset"][0].as<float>();
-                panel_command_->tool_offset[gri_i][1] = config["robot"]["gripper"][gri_i]["tool_offset"][1].as<float>();
-                panel_command_->tool_offset[gri_i][2] = config["robot"]["gripper"][gri_i]["tool_offset"][2].as<float>();
-                for (int joint_i=0; joint_i<gripper_joint_size_[gri_i]; joint_i++){
-                    panel_command_->gripper_soft_limit_position_deg[gri_i][joint_i][0] = config["robot"]["gripper"][gri_i]["safety"]["joint_soft_limit"]["position"][0][joint_i].as<float>();
-                    panel_command_->gripper_soft_limit_position_deg[gri_i][joint_i][1] = config["robot"]["gripper"][gri_i]["safety"]["joint_soft_limit"]["position"][1][joint_i].as<float>();
-                }
-            }
+    void ensureRobotStarted() const{
+        if (!started_){
+            throw std::runtime_error("Spark2::ensureRobotStarted failed: robot hasn't been started");
         }
-        
-        void udpReceiveTask() {
-            while (!shutdown_.load()){
-                long t0 = get_time_now();
-                std::unique_ptr<PlannerState> temp = std::make_unique<PlannerState>();
-                if (udp_->receive(temp.get(), 50)){
-                    //Convert from rad to deg for pos and vel.
-                    for (int arm_i=0; arm_i<arm_size_; arm_i++){
-                        for (int i=0; i < arm_joint_size_[arm_i]; i++){
-                            temp->JointPos[arm_i][i] *= kRadToDeg;
-                            temp->JointVel[arm_i][i] *= kRadToDeg;
-                            temp->MotorPos[arm_i][i] *= kRadToDeg;
-                            temp->MotorVel[arm_i][i] *= kRadToDeg;
-
-                            temp->arm_soft_limit_position[arm_i][i][0] *= kRadToDeg;
-                            temp->arm_soft_limit_position[arm_i][i][1] *= kRadToDeg;
-                            temp->arm_soft_limit_velocity[arm_i][i][0] *= kRadToDeg;
-                            temp->arm_soft_limit_velocity[arm_i][i][1] *= kRadToDeg;
-                            temp->arm_soft_limit_torque[arm_i][i][0]   *= kRadToDeg;
-                            temp->arm_soft_limit_torque[arm_i][i][1]   *= kRadToDeg;
-
-                            temp->arm_hard_limit_position[arm_i][i][0] *= kRadToDeg;
-                            temp->arm_hard_limit_position[arm_i][i][1] *= kRadToDeg;
-                            temp->arm_hard_limit_velocity[arm_i][i][0] *= kRadToDeg;
-                            temp->arm_hard_limit_velocity[arm_i][i][1] *= kRadToDeg;
-                            temp->arm_hard_limit_torque[arm_i][i][0]   *= kRadToDeg;
-                            temp->arm_hard_limit_torque[arm_i][i][1]   *= kRadToDeg;
-
-                            temp->arm_follow_limit_position[arm_i][i] *= kRadToDeg;
-                            temp->arm_follow_limit_velocity[arm_i][i] *= kRadToDeg;
-                            temp->arm_follow_limit_torque[arm_i][i]   *= kRadToDeg;
-
-                            temp->arm_jump_limit_position[arm_i][i] *= kRadToDeg;
-                            temp->arm_jump_limit_velocity[arm_i][i] *= kRadToDeg;
-                            temp->arm_jump_limit_torque[arm_i][i]   *= kRadToDeg;
-                        }
-
-                        for (int gri_i=0; gri_i<gripper_size_; gri_i++){
-                            for (int joint_i=0; joint_i<gripper_joint_size_[gri_i]; joint_i++){
-                                temp->gripper_soft_limit_position[gri_i][joint_i][0] *= kRadToDeg;
-                                temp->gripper_soft_limit_position[gri_i][joint_i][1] *= kRadToDeg;
-                                temp->gripper_hard_limit_position[gri_i][joint_i][0] *= kRadToDeg;
-                                temp->gripper_hard_limit_position[gri_i][joint_i][1] *= kRadToDeg;
-                            }
-                        }
-                    }
-                    //Update planner state
-                    planner_state_ = std::move(temp);
-                    first_state_received_ = true;
-                }
-                
-                long t1 = get_time_now();
-                if (t1 - t0 < receive_dt_us_){
-                    sleep_period(receive_dt_us_ - (t1 - t0));
-                }
-            }
-        }
-
-        void udpSendOnce(){
-            panel_command_->send_timestamp = get_time_now();
-            
-            //Convert from deg to rad for pos and vel.
-            float a = (panel_command_->target_type != ControlType::kTorque)? kDegToRad : 1;
-            for (int arm_i=0; arm_i<arm_size_; arm_i++){
-                for (int i=0; i < arm_joint_size_[arm_i]; i++)
-                    panel_command_->JointCmd[arm_i][i] = panel_command_->JointCmdDeg[arm_i][i] * a;
-                for (int i=0; i < 6; i++){
-                    panel_command_->TaskCmd[arm_i][i]  = panel_command_->TaskCmdDeg[arm_i][i];
-                    if (i > 2) panel_command_->TaskCmd[arm_i][i] *= kDegToRad;  //Last 3 variables are rotation
-                }
-            }
-
-            for (int i = 0; i < panel_command_->ArmWaypointSize; i++){
-                for (int arm_i=0; arm_i<arm_size_; arm_i++){
-                    if (panel_command_->motion_type == MotionControl::kJoint){
-                        for (int joint_i=0; joint_i < arm_joint_size_[arm_i]; joint_i++){
-                            panel_command_->ArmWaypointCmd[i][arm_i][joint_i] = panel_command_->ArmWaypointCmdDeg[i][arm_i][joint_i] * a;
-                        }
-                    }else if (panel_command_->motion_type == MotionControl::kTask || panel_command_->motion_type == MotionControl::kTaskLine){
-                        for (int j=0; j < 6; j++){
-                            panel_command_->ArmWaypointCmd[i][arm_i][j] = panel_command_->ArmWaypointCmdDeg[i][arm_i][j];
-                            if (j > 2) panel_command_->ArmWaypointCmd[i][arm_i][j] *= kDegToRad;  //Last 3 variables are rotation
-                        }
-                    }
-                }
-            }
-
-            for (int arm_i=0; arm_i<arm_size_; arm_i++){
-                for (int i=0; i<arm_joint_size_[arm_i]; i++){
-                    panel_command_->arm_soft_limit_position[arm_i][i][0] = panel_command_->arm_soft_limit_position_deg[arm_i][i][0] * kDegToRad;
-                    panel_command_->arm_soft_limit_position[arm_i][i][1] = panel_command_->arm_soft_limit_position_deg[arm_i][i][1] * kDegToRad;
-                    panel_command_->arm_soft_limit_velocity[arm_i][i][0] = panel_command_->arm_soft_limit_velocity_deg[arm_i][i][0] * kDegToRad;
-                    panel_command_->arm_soft_limit_velocity[arm_i][i][1] = panel_command_->arm_soft_limit_velocity_deg[arm_i][i][1] * kDegToRad;
-                }
-            }
-
-            for (int gri_i=0; gri_i<gripper_size_; gri_i++){
-                for (int joint_i=0; joint_i<gripper_joint_size_[gri_i]; joint_i++){
-                    panel_command_->gripper_soft_limit_position[gri_i][joint_i][0] = panel_command_->gripper_soft_limit_position_deg[gri_i][joint_i][0] * kDegToRad;
-                    panel_command_->gripper_soft_limit_position[gri_i][joint_i][1] = panel_command_->gripper_soft_limit_position_deg[gri_i][joint_i][1] * kDegToRad;
-                }
-            }
-            udp_->send(panel_command_.get());
-            panel_command_->sequence_id++;
-            last_motion_control_ = (MotionControl)panel_command_->motion_type; 
-            last_target_type_ = panel_command_->target_type;
-            last_actuator_mode_ = panel_command_->actuator_mode;
-        }
-
-        void udpSendAndAckTask(float exit_timeout_s = 20.0f){
-            //Time in us
-            long t = 0;
-            long dt = receive_dt_us_*2;
-            long resend_timeout = 1000000; // 1sec
-            long exit_timeout = exit_timeout_s*1e6; // 10 sec
-            bool need_send = true;
-
-            std::lock_guard<std::mutex> lock(panel_command_mutex_);
-            if (last_actuator_mode_ != panel_command_->actuator_mode || panel_command_->reset_interpolation || panel_command_->reset_control_mem){
-                panel_command_->need_setting_update = true;
-            }
-
-            while (t < exit_timeout && need_send){
-                udpSendOnce();
-
-                long t1 = 0;
-                while (t1 < resend_timeout){
-                    if (panel_command_->need_setting_update){
-                        if (isLatestTargetReceived()){
-                            panel_command_->need_setting_update = false;
-                            panel_command_->reset_interpolation = false;
-                            panel_command_->reset_control_mem = false; //Reset task/null saved pose for arm
-                            break;
-                        }
-                    }else if (planner_state_->setting_update_finished && isLatestTargetReceived()){
-                        need_send = false;
-                        break;
-                    }
-                    sleep_period(dt);
-                    t1 += dt;
-                }
-                t += t1;
-            }
-
-            if (t >= exit_timeout){
-                throw std::runtime_error("Spark2::udpSendAndAckTask failed: No ACK received after " 
-                    + std::to_string(exit_timeout/1000000.0) + " seconds\n");
-            }
-        }
-
-        bool isLatestTargetReceived(){
-            ensureRobotStarted();
-            return planner_state_->received_sequence_id == panel_command_->sequence_id - 1;
-        }
-
-        void ensureRobotStarted(){
-            if (!started_){
-                throw std::runtime_error("Spark2::ensureRobotStarted failed: robot hasn't been started");
-            }
-        }
-
-        template<typename T>
-        void validatePathSize(const std::string& function_name, const Path<T>& arm_pos, const Path<int>& v, const Path<float>& t){
-            if (v.size() != arm_pos.size() && t.size() != arm_pos.size()) {
-                throw std::invalid_argument(
-                    "Spark2::" + function_name + " failed: Size mismatch. "
-                    "Either velocity path ('v') or time path ('t') must have the same size as position path ('arm_pos'), but got " + 
-                    std::to_string(v.size()) + " and " + std::to_string(t.size()) + " for v and " + std::to_string(arm_pos.size()) + " for arm_pos"
-                );
-            }
-        }
-
-        bool isRobotStarted() {
-            return started_;
-        }
-
-        PanelCommand& getPanelCommand() {
-            if (!panel_command_) {
-                throw std::runtime_error("Spark2::getPanelCommand failed: panel_command_ is nullptr");
-            }
-            return *panel_command_;
-        }
-
-        PlannerState& getPlannerState() {
-            if (!planner_state_) {
-                throw std::runtime_error("Spark2::getPlannerState failed: planner_state_ is nullptr");
-            }
-            return *planner_state_;
-        }
-
-        void sendPanelCommand(){
-            udpSendAndAckTask();
-        }
-
-        void switchTargetType(ControlType target_type, ControlType panel_command){
-            panel_command_->target_type = target_type;
-            panel_command_->actuator_mode = panel_command;
-
-            //Set initial value 
-            int arm_i = 0;
-            for (int j=0; j<arm_joint_size_[arm_i]; j++){
-                panel_command_->JointCmdDeg[arm_i][j] = (target_type == ControlType::kPosition)? planner_state_->JointPos[arm_i][j] : 0;
-            }
-        }
-    };
-
-    Spark2::Spark2(std::string config_prefix_path) : pimpl_(std::make_unique<Impl>()){
-        std::string config_path = config_prefix_path + "/config.yaml";
-        YAML::Node config = loadYamlConfig(config_path);
-        pimpl_->initialize(config);
-        pimpl_->configurator_ = std::unique_ptr<Configurator>(new Configurator());
-        pimpl_->kinematics_ = std::unique_ptr<Kinematics>(new Kinematics());
-        pimpl_->kinematics_->pimpl_->initialize(config_prefix_path, config);
-        
-        //Register callback functions for the configurator
-        pimpl_->configurator_->pimpl_->registerCallback(
-            [this]() -> PanelCommand& { return pimpl_->getPanelCommand(); }, 
-            [this]() -> PlannerState& { return pimpl_->getPlannerState(); }, 
-            [this]() { pimpl_->sendPanelCommand(); },
-            [this]() { return pimpl_->isRobotStarted(); }
-        );
-
     }
 
-    Spark2::~Spark2(){
+    bool isRobotStarted() const{
+        return started_;
+    }
+
+    SdkConfigReq& getConfigReq(){ return config_req_; }
+    const SdkConfigRes& getConfigRes() const{
+        if (!have_config_res_){
+            throw std::runtime_error("Spark2::getConfigRes failed: no SdkConfigRes received yet");
+        }
+        return last_config_res_;
+    }
+
+    template<typename T>
+    void validatePathSize(const std::string& function_name, const Path<T>& path, const Path<int>& v, const Path<float>& t){
+        if (v.size() != path.size() && t.size() != path.size()){
+            throw std::invalid_argument(
+                "Spark2::" + function_name + " failed: Size mismatch. "
+                "Either velocity path ('v') or time path ('t') must have the same size as the path, but got "
+                + std::to_string(v.size()) + " and " + std::to_string(t.size())
+                + " for v/t and " + std::to_string(path.size()) + " for path");
+        }
+        if (path.size() > MAX_WAYPOINTS){
+            throw std::invalid_argument(
+                "Spark2::" + function_name + " failed: path size "
+                + std::to_string(path.size()) + " exceeds MAX_WAYPOINTS="
+                + std::to_string(MAX_WAYPOINTS));
+        }
+    }
+
+    void initialize(const YAML::Node& config){
+        config_ = config;
+        arm_size_ = static_cast<int>(config["robot"]["arm"].size());
+        arm_joint_size_.clear();
+        for (int arm_i = 0; arm_i < arm_size_; arm_i++){
+            arm_joint_size_.push_back(config["robot"]["arm"][arm_i]["joint_size"].as<int>());
+        }
+
+        gripper_size_ = 0;
+        gripper_joint_size_.clear();
+        if (config["robot"]["gripper"]){
+            gripper_size_ = static_cast<int>(config["robot"]["gripper"].size());
+            for (int gri_i = 0; gri_i < gripper_size_; gri_i++){
+                gripper_joint_size_.push_back(config["robot"]["gripper"][gri_i]["joint_size"].as<int>());
+            }
+        }
+
+        if (config["panel"]["dt_receive"]){
+            receive_dt_us_ = config["panel"]["dt_receive"].as<float>() * 1e6f;
+        } else if (config["panel"]["dt_receive_ms"]){
+            receive_dt_us_ = config["panel"]["dt_receive_ms"].as<float>() * 1e3f;
+        }
+        heartbeat_dt_ms_ = config["panel"]["dt_heartbeat_ms"]
+            ? config["panel"]["dt_heartbeat_ms"].as<float>() : 10.f;
+
+        client_id_ = config["rt_control"]["client_id"]
+            ? static_cast<uint16_t>(config["rt_control"]["client_id"].as<int>())
+            : kDefaultSdkClientId;
+
+        robot_name_ = config["robot"]["name"].as<std::string>();
+        default_acc_t_ = config["panel"]["general"]["acc_time"]
+            ? config["panel"]["general"]["acc_time"].as<float>() : 0.f;
+
+        const YAML::Node general = config["panel"]["general"];
+        std::string smoothing_str = "Cos";
+        if (general["smoothing_method"]){
+            smoothing_str = general["smoothing_method"].as<std::string>();
+        } else if (general["interpolation"]){
+            smoothing_str = general["interpolation"].as<std::string>();
+        }
+        initial_target_type_ = robot::platform::stringToEnum<ControlType>(general["target_type"].as<std::string>());
+        initial_actuator_mode_ = robot::platform::stringToEnum<ControlType>(general["actuator_mode"].as<std::string>());
+        actuator_mode_under_position_control_ =
+            (initial_target_type_ == ControlType::kPosition) ? initial_actuator_mode_ : ControlType::kPosition;
+        const auto smoothing = robot::platform::stringToEnum<PlatformSmoothingMethod>(smoothing_str);
+        default_smoothing_ = smoothing;
+
+        config_req_ = SdkConfigReq{};
+        cmd_req_ = SdkCommandReq{};
+        config_req_.payload.read_only = 1;
+        config_req_.payload.simulation = config["rt_control"]["hardware_simulation"].as<bool>() ? 1 : 0;
+        config_req_.payload.arm_size = static_cast<uint8_t>(arm_size_);
+        config_req_.payload.gripper_size = static_cast<uint8_t>(gripper_size_);
+        std::snprintf(config_req_.payload.robot_name, sizeof(config_req_.payload.robot_name), "%s", robot_name_.c_str());
+        std::snprintf(cmd_req_.payload.robot_name, sizeof(cmd_req_.payload.robot_name), "%s", robot_name_.c_str());
+        cmd_req_.payload.arm_size = static_cast<uint8_t>(arm_size_);
+        cmd_req_.payload.gripper_size = static_cast<uint8_t>(gripper_size_);
+        cmd_req_.payload.target_count = 1;
+        cmd_req_.payload.enable_jog = 0;
+        cmd_req_.payload.activated_control_strategy = ControlStrategy::kJoint;
+
+        srv_state_->payload.arm_size = static_cast<uint8_t>(arm_size_);
+        srv_state_->payload.gripper_size = static_cast<uint8_t>(gripper_size_);
+
+        for (int arm_i = 0; arm_i < arm_size_; arm_i++){
+            const int nj = arm_joint_size_[arm_i];
+            config_req_.payload.arm_joint_size[arm_i] = static_cast<uint8_t>(nj);
+            cmd_req_.payload.arm_joint_size[arm_i] = static_cast<uint8_t>(nj);
+            srv_state_->payload.arm_joint_size[arm_i] = static_cast<uint8_t>(nj);
+
+            auto& arm_cfg = config_req_.payload.arm[arm_i];
+            arm_cfg.control_strategy = ControlStrategy::kJoint;
+            arm_cfg.filter_type = smoothing;
+            arm_cfg.target_type = initial_target_type_;
+            arm_cfg.actuator_mode = initial_actuator_mode_;
+            arm_cfg.playback_cmd = PlaybackState::kStop;
+            arm_cfg.frame_reference = FrameReference::kTool;
+            arm_cfg.reset_control_mem = 0;
+            arm_cfg.reset_interpolation = 0;
+            arm_cfg.tool_offset = PositionTarget{0.f, 0.f, 0.f};
+
+            for (int joint_i = 0; joint_i < nj; joint_i++){
+                arm_cfg.enable_joint[joint_i] =
+                    config["robot"]["arm"][arm_i]["enable_joint"][joint_i].as<bool>() ? 1 : 0;
+                arm_cfg.soft_limit_position[joint_i][0] =
+                    config["robot"]["arm"][arm_i]["safety"]["joint_soft_limit"]["position"][0][joint_i].as<float>() * kDegToRad;
+                arm_cfg.soft_limit_position[joint_i][1] =
+                    config["robot"]["arm"][arm_i]["safety"]["joint_soft_limit"]["position"][1][joint_i].as<float>() * kDegToRad;
+                arm_cfg.soft_limit_velocity[joint_i] = std::abs(
+                    config["robot"]["arm"][arm_i]["safety"]["joint_soft_limit"]["velocity"][joint_i].as<float>()) * kDegToRad;
+                if (config["robot"]["arm"][arm_i]["safety"]["joint_soft_limit"]["torque"]){
+                    arm_cfg.soft_limit_torque[joint_i] = std::abs(
+                        config["robot"]["arm"][arm_i]["safety"]["joint_soft_limit"]["torque"][joint_i].as<float>());
+                } else {
+                    arm_cfg.soft_limit_torque[joint_i] = 40.f;
+                }
+            }
+
+            if (gripper_size_ > arm_i && config["robot"]["gripper"][arm_i]["offset_from_ee"]){
+                const auto& off = config["robot"]["gripper"][arm_i]["offset_from_ee"];
+                arm_cfg.tool_offset = PositionTarget{
+                    off[0].as<float>(), off[1].as<float>(), off[2].as<float>()};
+            }
+        }
+
+        for (int gri_i = 0; gri_i < gripper_size_; gri_i++){
+            const int nj = gripper_joint_size_[gri_i];
+            config_req_.payload.gripper_joint_size[gri_i] = static_cast<uint8_t>(nj);
+            cmd_req_.payload.gripper_joint_size[gri_i] = static_cast<uint8_t>(nj);
+            srv_state_->payload.gripper_joint_size[gri_i] = static_cast<uint8_t>(nj);
+            config_req_.payload.gripper[gri_i].target_type = initial_target_type_;
+            for (int joint_i = 0; joint_i < nj; joint_i++){
+                if (config["robot"]["gripper"][gri_i]["safety"]
+                    && config["robot"]["gripper"][gri_i]["safety"]["joint_soft_limit"]){
+                    config_req_.payload.gripper[gri_i].soft_limit_position[joint_i][0] =
+                        config["robot"]["gripper"][gri_i]["safety"]["joint_soft_limit"]["position"][0][joint_i].as<float>() * kDegToRad;
+                    config_req_.payload.gripper[gri_i].soft_limit_position[joint_i][1] =
+                        config["robot"]["gripper"][gri_i]["safety"]["joint_soft_limit"]["position"][1][joint_i].as<float>() * kDegToRad;
+                }
+            }
+        }
+    }
+
+    std::shared_ptr<SrvState> snapshotState(){
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (transmit_state_){
+            srv_state_ = transmit_state_;
+        }
+        return srv_state_;
+    }
+
+    void receiveLoop(){
+        while (!shutdown_.load()){
+            const long t0 = robot::platform::get_time_now();
+            SrvState temp{};
+            if (mcast_ && mcast_->receive(temp, 50)){
+                auto shared = std::make_shared<SrvState>(std::move(temp));
+                {
+                    std::lock_guard<std::mutex> lock(state_mutex_);
+                    transmit_state_ = shared;
+                    srv_state_ = shared;
+                }
+                first_state_received_ = true;
+            }
+            const long t1 = robot::platform::get_time_now();
+            const long elapsed = t1 - t0;
+            if (elapsed < static_cast<long>(receive_dt_us_)){
+                robot::platform::sleep_period(static_cast<int>(receive_dt_us_ - static_cast<float>(elapsed)));
+            }
+        }
+    }
+
+    void heartbeatLoop(){
+        while (!shutdown_.load()){
+            if (monitoring_ && session_id_ != 0){
+                SdkHeartbeatReq heartbeat{};
+                heartbeat.client_id = client_id_;
+                heartbeat.session_id = session_id_;
+                heartbeat.timestamp_us = static_cast<uint64_t>(robot::platform::get_time_now());
+                MonitoringRequestVariantPtr request =
+                    std::make_unique<MonitoringRequestVariant>(heartbeat);
+                try {
+                    monitoring_->send(request);
+                } catch (const std::exception& e){
+                    std::cerr << "Spark2 heartbeat send failed: " << e.what() << std::endl;
+                }
+            }
+            std::this_thread::sleep_for(
+                std::chrono::duration<float, std::milli>(heartbeat_dt_ms_));
+        }
+    }
+
+    void sendConfigAndWait(){
+        std::lock_guard<std::mutex> lock(send_mutex_);
+        if (!mcast_){
+            throw std::runtime_error("Spark2::sendConfigAndWait failed: mcast client is null");
+        }
+
+        config_req_.client_id = client_id_;
+        config_req_.session_id = session_id_;
+        config_req_.payload.read_only = 0;
+
+        const long t0 = robot::platform::get_time_now();
+        long t1 = t0;
+        bool success = false;
+        while ((t1 - t0) < static_cast<long>(kConfigExitTimeoutMs * 1000.f)){
+            config_req_.sequence_id = ++sequence_id_;
+            config_req_.timestamp_us = static_cast<uint64_t>(robot::platform::get_time_now());
+            auto request = std::make_unique<CoreRequestVariant>(config_req_);
+            mcast_->send(std::move(request));
+
+            CoreResponseVariantPtr ack = mcast_->waitAck(client_id_, sequence_id_, kConfigAckTimeoutMs);
+            if (isConfigAckSuccess(ack)){
+                last_config_res_ = std::get<SdkConfigRes>(*ack);
+                have_config_res_ = true;
+                robot::platform::updateConfigRequest(last_config_res_, config_req_);
+                config_req_.payload.read_only = 1;
+                success = true;
+                break;
+            }
+            t1 = robot::platform::get_time_now();
+        }
+        if (!success){
+            throw std::runtime_error("Spark2::sendConfigAndWait failed: no successful SdkConfigRes within timeout");
+        }
+    }
+
+    void sendCommandAndWait(float ack_timeout_ms = kCommandAckTimeoutMs){
+        std::lock_guard<std::mutex> lock(send_mutex_);
+        if (!mcast_){
+            throw std::runtime_error("Spark2::sendCommandAndWait failed: mcast client is null");
+        }
+
+        cmd_req_.client_id = client_id_;
+        cmd_req_.session_id = session_id_;
+        cmd_req_.payload.activated_control_strategy = config_req_.payload.arm[0].control_strategy;
+        cmd_req_.sequence_id = ++sequence_id_;
+        cmd_req_.timestamp_us = static_cast<uint64_t>(robot::platform::get_time_now());
+
+        auto request = std::make_unique<CoreRequestVariant>(cmd_req_);
+        mcast_->send(std::move(request));
+
+        CoreResponseVariantPtr ack = mcast_->waitAck(client_id_, sequence_id_, ack_timeout_ms);
+        if (!isCommandAckSuccess(ack)){
+            std::string status = "missing or unexpected SdkCommandRes";
+            if (ack && std::holds_alternative<SdkCommandRes>(*ack)){
+                status = robot::platform::enumToString(std::get<SdkCommandRes>(*ack).payload.status);
+            }
+            throw std::runtime_error("Spark2::sendCommandAndWait failed: " + status);
+        }
+    }
+
+    void applyArmMode(
+        ControlStrategy strategy,
+        ControlType target_type,
+        ControlType actuator_mode,
+        bool reset_interpolation = false,
+        bool reset_control_mem = false,
+        PlaybackState playback = PlaybackState::kStop,
+        PlatformSmoothingMethod* smoothing = nullptr){
+        bool need_config = false;
+        for (int arm_i = 0; arm_i < arm_size_; arm_i++){
+            auto& arm = config_req_.payload.arm[arm_i];
+            if (arm.control_strategy != strategy
+                || arm.target_type != target_type
+                || arm.actuator_mode != actuator_mode
+                || arm.playback_cmd != playback
+                || (smoothing && arm.filter_type != *smoothing)
+                || reset_interpolation
+                || reset_control_mem){
+                need_config = true;
+            }
+            arm.control_strategy = strategy;
+            arm.target_type = target_type;
+            arm.actuator_mode = actuator_mode;
+            arm.playback_cmd = playback;
+            if (smoothing){
+                arm.filter_type = *smoothing;
+            }
+            arm.reset_interpolation = reset_interpolation ? 1 : 0;
+            arm.reset_control_mem = reset_control_mem ? 1 : 0;
+        }
+        if (need_config){
+            sendConfigAndWait();
+            for (int arm_i = 0; arm_i < arm_size_; arm_i++){
+                config_req_.payload.arm[arm_i].reset_interpolation = 0;
+                config_req_.payload.arm[arm_i].reset_control_mem = 0;
+            }
+        }
+        cmd_req_.payload.activated_control_strategy = strategy;
+        cmd_req_.payload.enable_jog = 0;
+    }
+
+    /** Multi-waypoint Path APIs require QuinticPath; single-point APIs restore config default. */
+    void applyPathArmMode(
+        ControlStrategy strategy,
+        ControlType target_type,
+        ControlType actuator_mode,
+        bool reset_control_mem = true){
+        auto path_smoothing = PlatformSmoothingMethod::kQuinticPath;
+        applyArmMode(
+            strategy, target_type, actuator_mode,
+            /*reset_interpolation=*/true,
+            reset_control_mem,
+            PlaybackState::kStop,
+            &path_smoothing);
+    }
+
+    void applySinglePointArmMode(
+        ControlStrategy strategy,
+        ControlType target_type,
+        ControlType actuator_mode,
+        bool reset_interpolation = false,
+        bool reset_control_mem = false,
+        PlaybackState playback = PlaybackState::kStop){
+        // QuinticPath cannot interpolate single targets; restore the configured default.
+        applyArmMode(
+            strategy, target_type, actuator_mode,
+            reset_interpolation, reset_control_mem, playback,
+            &default_smoothing_);
+    }
+
+    void fillHoldJointCommand(){
+        auto state = snapshotState();
+        cmd_req_.payload.target_count = 1;
+        cmd_req_.payload.enable_jog = 0;
+        auto& target = cmd_req_.payload.target[0];
+        target.interpolation_t = 0.f;
+        target.interpolation_speed_ratio = 0.f;
+        for (int arm_i = 0; arm_i < arm_size_; arm_i++){
+            for (int j = 0; j < arm_joint_size_[arm_i]; j++){
+                target.arm_joint[arm_i][j] = state->payload.arm[arm_i].position[j];
+            }
+        }
+        for (int gri_i = 0; gri_i < gripper_size_; gri_i++){
+            for (int j = 0; j < gripper_joint_size_[gri_i]; j++){
+                target.gripper_joint[gri_i][j] = state->payload.gripper[gri_i].position[j];
+            }
+        }
+    }
+
+    void fillPathTiming(int count, const Path<int>& v, const Path<float>& t){
+        for (int i = 0; i < count; i++){
+            cmd_req_.payload.target[i].interpolation_t = default_acc_t_;
+            cmd_req_.payload.target[i].interpolation_speed_ratio = 0.f;
+        }
+        if (static_cast<int>(t.size()) == count){
+            for (int i = 0; i < count; i++){
+                cmd_req_.payload.target[i].interpolation_t = t[i];
+            }
+        }
+        if (static_cast<int>(v.size()) == count){
+            for (int i = 0; i < count; i++){
+                cmd_req_.payload.target[i].interpolation_speed_ratio =
+                    std::clamp(v[i] / 100.0f, 0.0f, 1.0f);
+            }
+        }
+    }
+
+    void shutdownTransport(){
+        shutdown_.store(true);
+        if (receive_thread_.joinable()){
+            receive_thread_.join();
+        }
+        if (heartbeat_thread_.joinable()){
+            heartbeat_thread_.join();
+        }
+        if (mcast_){
+            mcast_->close();
+            mcast_.reset();
+        }
+        if (monitoring_){
+            monitoring_->close();
+            monitoring_.reset();
+        }
+        first_state_received_ = false;
+        started_ = false;
+        session_id_ = 0;
+    }
+};
+
+Spark2::Spark2(std::string config_prefix_path) : pimpl_(std::make_unique<Impl>()){
+    pimpl_->config_prefix_path_ = config_prefix_path;
+    const std::string config_path = config_prefix_path + "/config.yaml";
+    YAML::Node config = robot::platform::loadYamlConfig(config_path);
+    pimpl_->initialize(config);
+    pimpl_->configurator_ = std::unique_ptr<Configurator>(new Configurator());
+    pimpl_->kinematics_ = std::unique_ptr<Kinematics>(new Kinematics());
+    pimpl_->kinematics_->pimpl_->initialize(config_prefix_path, config);
+
+    pimpl_->configurator_->pimpl_->arm_joint_size_ =
+        pimpl_->arm_joint_size_.empty() ? 6 : pimpl_->arm_joint_size_[0];
+    pimpl_->configurator_->pimpl_->gripper_joint_size_ =
+        pimpl_->gripper_joint_size_.empty() ? 1 : pimpl_->gripper_joint_size_[0];
+
+    pimpl_->configurator_->pimpl_->registerCallback(
+        [this]() -> SdkConfigReq& { return pimpl_->getConfigReq(); },
+        [this]() -> const SdkConfigRes& { return pimpl_->getConfigRes(); },
+        [this]() { pimpl_->sendConfigAndWait(); },
+        [this]() { return pimpl_->isRobotStarted(); }
+    );
+}
+
+Spark2::~Spark2(){
+    try {
         stop();
+    } catch (...) {}
+    pimpl_->shutdownTransport();
+    pimpl_->configurator_.reset();
+    pimpl_->kinematics_.reset();
+    pimpl_.reset();
+}
 
-        pimpl_->shutdown_.store(true);
-        if (pimpl_->receive_thread_.joinable()){
-            pimpl_->receive_thread_.join();
-        }
-
-        if (pimpl_->udp_) {
-            pimpl_->udp_->close();
-            pimpl_->udp_.reset();
-        }
-
-        pimpl_->configurator_.reset();
-        pimpl_->kinematics_.reset();
-        pimpl_.reset();
+void Spark2::start(){
+    if (pimpl_->started_){
+        return;
     }
 
-    // Connection
-    void Spark2::start(){
-        //Initialize UDP
-        try {
-            YAML::Node config = pimpl_->config_;
-            int buffer_size = 8192;
-            pimpl_->udp_ = std::make_unique<CuarmUdp<PlannerState, PanelCommand>>(
-                config["panel"]["ip"].as<std::string>(),
-                config["panel"]["port"].as<int>(),
-                config["rt_control"]["ip"].as<std::string>(),
-                config["rt_control"]["port"].as<int>(), 
-                &CuarmMessageHandler::unpack_planner_state,
-                &CuarmMessageHandler::pack_panel_command, buffer_size);
+    try {
+        YAML::Node config = pimpl_->config_;
+        std::filesystem::path keys_path;
+        if (config["rt_control"]["keys_path"]){
+            keys_path = std::filesystem::path(pimpl_->config_prefix_path_)
+                / config["rt_control"]["keys_path"].as<std::string>();
+        } else {
+            // Default: configuration/keys.json next to config.yaml (SDK package; no rt_control tree).
+            keys_path = std::filesystem::path(pimpl_->config_prefix_path_) / "keys.json";
+        }
+        keys_path = std::filesystem::weakly_canonical(keys_path);
+        if (!robot::platform::loadClientKeys(keys_path.string())){
+            throw std::runtime_error("Failed to load client keys from " + keys_path.string());
+        }
 
-            //Start UDP receive thread
-            pimpl_->receive_thread_ = std::thread(&Impl::udpReceiveTask, pimpl_.get());
-            
-            //Wait for the first state
-            std::cout << "Connecting to Robot..." <<std::endl;
-            while (!pimpl_->first_state_received_.load()){
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        const int receive_ack_port = config["panel"]["port"].as<int>();
+        const std::string configured_server_ip = config["rt_control"]["server_ip"]
+            ? config["rt_control"]["server_ip"].as<std::string>() : std::string("auto");
+        const int core_request_port = config["rt_control"]["core_request_port"].as<int>();
+        const std::string multicast_ip = config["rt_control"]["multicast_ip"].as<std::string>();
+        const int multicast_port = config["rt_control"]["multicast_port"].as<int>();
+        const int monitoring_request_port = config["rt_control"]["monitoring_request_port"].as<int>();
+
+        std::vector<std::string> probe_ips;
+        const bool use_auto_discovery =
+            configured_server_ip.empty()
+            || configured_server_ip == "auto"
+            || configured_server_ip == "discover";
+        if (use_auto_discovery){
+            probe_ips.push_back(multicast_ip);
+            probe_ips.push_back("255.255.255.255");
+            probe_ips.push_back("127.0.0.1");
+        } else {
+            probe_ips.push_back(configured_server_ip);
+        }
+
+        std::cout << "Discovering Robot..." << std::endl;
+        const robot::platform::DiscoveredServer discovered =
+            robot::platform::discoverRtServerViaHandshake(
+                pimpl_->client_id_, core_request_port, receive_ack_port, probe_ips);
+        pimpl_->session_id_ = discovered.session_id;
+        const std::string server_ip = discovered.server_ip;
+
+        pimpl_->shutdown_.store(false);
+        pimpl_->mcast_ = std::make_unique<SdkMcastClient>(
+            server_ip,
+            core_request_port,
+            multicast_ip,
+            multicast_port,
+            receive_ack_port,
+            unpackSrvState,
+            packCoreRequest,
+            unpackCoreResponse,
+            kAckPollMs);
+
+        pimpl_->monitoring_ = std::make_unique<MonitoringUdp>(
+            "",
+            -1,
+            server_ip,
+            monitoring_request_port,
+            nullptr,
+            packMonitoringRequest);
+
+        pimpl_->receive_thread_ = std::thread(&Impl::receiveLoop, pimpl_.get());
+        pimpl_->heartbeat_thread_ = std::thread(&Impl::heartbeatLoop, pimpl_.get());
+
+        std::cout << "Connecting to Robot at " << server_ip << "..." << std::endl;
+        const auto connect_started = std::chrono::steady_clock::now();
+        while (!pimpl_->first_state_received_.load()){
+            if (std::chrono::steady_clock::now() - connect_started > std::chrono::seconds(30)){
+                throw std::runtime_error("Timed out waiting for SrvState from robot");
             }
-            pimpl_->started_ = true;
-
-            //Send the first command of 0 velocity
-            pimpl_->udpSendAndAckTask(20); //exit_time_s = 20
-
-            //Switch back to config's initial mode
-            pimpl_->switchTargetType(pimpl_->initial_target_type_, pimpl_->initial_actuator_mode_);
-            pimpl_->udpSendAndAckTask();
-        }catch (const std::exception& e) {
-            throw std::runtime_error("Failed to initialize UDP communication: " + std::string(e.what()));
-        }
-        std::cout << "Successfully connected to Robot." <<std::endl;
-    }
-
-    void Spark2::stop(){
-        if (!pimpl_->started_) return;
-        pimpl_->panel_command_->connection_state = ConnectionState::kShutDown;
-        pimpl_->udpSendAndAckTask(); 
-        pimpl_->started_ = false;
-    }
-    
-    void Spark2::enableArmJoint(JointState6b arm_state){
-        pimpl_->ensureRobotStarted();
-        int arm_i = 0;
-        for (int joint_i=0; joint_i<pimpl_->arm_joint_size_[arm_i]; joint_i++){
-            pimpl_->panel_command_->enable_joint[arm_i][joint_i] = arm_state[joint_i];
-        }
-        pimpl_->panel_command_->need_setting_update = true;
-        pimpl_->udpSendAndAckTask(); 
-    }
-
-    // Motion Mode
-    void Spark2::setArmSmoothingMethod(SmoothingMethod method){
-        pimpl_->ensureRobotStarted();
-        switch (method){
-            case SmoothingMethod::kLinear:
-                pimpl_->panel_command_->interpolation_type = InterpolationMethod::kLinear;
-                break;
-            case SmoothingMethod::kCos:
-                pimpl_->panel_command_->interpolation_type = InterpolationMethod::kCos;
-                break;
-            case SmoothingMethod::kCubic:
-                pimpl_->panel_command_->interpolation_type = InterpolationMethod::kCubic;
-                break;
-            case SmoothingMethod::kQuintic:
-                pimpl_->panel_command_->interpolation_type = InterpolationMethod::kQuintic;
-                break;
-            case SmoothingMethod::kNone:
-                pimpl_->panel_command_->interpolation_type = InterpolationMethod::kNone;
-                break;
-        }
-        pimpl_->udpSendAndAckTask(); 
-    }
-
-    // Manual Mode
-    void Spark2::movePos(const JointState6f& arm_pos, int v, float t){
-        pimpl_->ensureRobotStarted();
-        pimpl_->panel_command_->motion_type = MotionControl::kJoint;
-        pimpl_->panel_command_->arm_target_mode = PanelTargetMode::kSinglePoint;
-        pimpl_->switchTargetType(ControlType::kPosition, pimpl_->actuator_mode_under_position_control_);
-        pimpl_->panel_command_->InterpolationAccTime = t;
-        pimpl_->panel_command_->interpolation_speed_ratio = std::clamp(v / 100.0f, 0.0f, 1.0f);
-        
-        int arm_i = 0;
-        for (int j=0; j<pimpl_->arm_joint_size_[arm_i]; j++){
-            pimpl_->panel_command_->JointCmdDeg[arm_i][j] = arm_pos[j];
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
 
-        pimpl_->udpSendAndAckTask(); 
+        pimpl_->config_req_.client_id = pimpl_->client_id_;
+        pimpl_->config_req_.session_id = pimpl_->session_id_;
+        pimpl_->cmd_req_.client_id = pimpl_->client_id_;
+        pimpl_->cmd_req_.session_id = pimpl_->session_id_;
+        pimpl_->config_req_.payload.read_only = 0;
+        pimpl_->sendConfigAndWait();
+
+        pimpl_->applyArmMode(
+            ControlStrategy::kJoint,
+            pimpl_->initial_target_type_,
+            pimpl_->initial_actuator_mode_);
+        pimpl_->fillHoldJointCommand();
+        pimpl_->sendCommandAndWait();
+
+        pimpl_->started_ = true;
+        std::cout << "Successfully connected to Robot." << std::endl;
+    } catch (const std::exception& e){
+        pimpl_->shutdownTransport();
+        throw std::runtime_error(std::string("Failed to start Spark2 SDK: ") + e.what());
     }
+}
 
-    void Spark2::movePosPath(const Path<JointState6f>& arm_pos, Path<int> v, Path<float> t){
-        pimpl_->ensureRobotStarted();
-        pimpl_->validatePathSize("movePosPath", arm_pos, v, t);
+void Spark2::stop(){
+    if (!pimpl_->started_){
+        return;
+    }
+    pimpl_->started_ = false;
+    pimpl_->shutdownTransport();
+}
 
-        pimpl_->panel_command_->motion_type = MotionControl::kJoint;
-        pimpl_->panel_command_->arm_target_mode = PanelTargetMode::kWaypoint;
-        pimpl_->switchTargetType(ControlType::kPosition, pimpl_->actuator_mode_under_position_control_);
-        pimpl_->panel_command_->reset_interpolation = true;
+void Spark2::enableArmJoint(JointState6b arm_state){
+    pimpl_->ensureRobotStarted();
+    const int arm_i = 0;
+    for (int joint_i = 0; joint_i < pimpl_->arm_joint_size_[arm_i]; joint_i++){
+        pimpl_->config_req_.payload.arm[arm_i].enable_joint[joint_i] = arm_state[joint_i] ? 1 : 0;
+    }
+    pimpl_->sendConfigAndWait();
+}
 
-        int arm_i = 0;
-        pimpl_->panel_command_->ArmWaypointSize = arm_pos.size();
-        for (int i=0; i<pimpl_->panel_command_->ArmWaypointSize; i++){
-            for (int k=0; k<pimpl_->arm_joint_size_[arm_i]; k++){
-                pimpl_->panel_command_->ArmWaypointCmdDeg[i][arm_i][k] = arm_pos[i][k];
-            }
+void Spark2::setArmSmoothingMethod(SmoothingMethod method){
+    pimpl_->ensureRobotStarted();
+    const auto platform_method = toPlatformSmoothing(method);
+    pimpl_->default_smoothing_ = platform_method;
+    for (int arm_i = 0; arm_i < pimpl_->arm_size_; arm_i++){
+        pimpl_->config_req_.payload.arm[arm_i].filter_type = platform_method;
+    }
+    pimpl_->sendConfigAndWait();
+}
+
+void Spark2::movePos(const JointState6f& arm_pos, int v, float t){
+    pimpl_->ensureRobotStarted();
+    pimpl_->applySinglePointArmMode(
+        ControlStrategy::kJoint,
+        ControlType::kPosition,
+        pimpl_->actuator_mode_under_position_control_);
+
+    pimpl_->cmd_req_.payload.target_count = 1;
+    pimpl_->cmd_req_.payload.enable_jog = 0;
+    auto& target = pimpl_->cmd_req_.payload.target[0];
+    target.interpolation_t = (t > 0.f) ? t : pimpl_->default_acc_t_;
+    target.interpolation_speed_ratio = std::clamp(v / 100.0f, 0.0f, 1.0f);
+
+    const int arm_i = 0;
+    for (int j = 0; j < pimpl_->arm_joint_size_[arm_i]; j++){
+        target.arm_joint[arm_i][j] = arm_pos[j] * kDegToRad;
+    }
+    pimpl_->sendCommandAndWait();
+}
+
+void Spark2::movePosPath(const Path<JointState6f>& arm_pos, Path<int> v, Path<float> t){
+    pimpl_->ensureRobotStarted();
+    pimpl_->validatePathSize("movePosPath", arm_pos, v, t);
+    pimpl_->applyPathArmMode(
+        ControlStrategy::kJoint,
+        ControlType::kPosition,
+        pimpl_->actuator_mode_under_position_control_,
+        /*reset_control_mem=*/false);
+
+    const int count = static_cast<int>(arm_pos.size());
+    pimpl_->cmd_req_.payload.target_count = static_cast<uint8_t>(count);
+    pimpl_->cmd_req_.payload.enable_jog = 0;
+    const int arm_i = 0;
+    for (int i = 0; i < count; i++){
+        for (int j = 0; j < pimpl_->arm_joint_size_[arm_i]; j++){
+            pimpl_->cmd_req_.payload.target[i].arm_joint[arm_i][j] = arm_pos[i][j] * kDegToRad;
         }
+    }
+    pimpl_->fillPathTiming(count, v, t);
+    pimpl_->sendCommandAndWait();
+}
 
-        if (t.size() == arm_pos.size()){
-            for (int i=0; i<pimpl_->panel_command_->ArmWaypointSize; i++){
-                pimpl_->panel_command_->ArmWaypointInterpolationTime[i] = t[i];
-            }
+void Spark2::moveVel(const JointState6f& arm_vel, int a, float t){
+    pimpl_->ensureRobotStarted();
+    pimpl_->applySinglePointArmMode(
+        ControlStrategy::kJoint,
+        ControlType::kVelocity,
+        ControlType::kVelocity);
+
+    pimpl_->cmd_req_.payload.target_count = 1;
+    pimpl_->cmd_req_.payload.enable_jog = 0;
+    auto& target = pimpl_->cmd_req_.payload.target[0];
+    target.interpolation_t = t;
+    target.interpolation_speed_ratio = std::clamp(a / 100.0f, 0.0f, 1.0f);
+
+    const int arm_i = 0;
+    for (int j = 0; j < pimpl_->arm_joint_size_[arm_i]; j++){
+        target.arm_joint[arm_i][j] = arm_vel[j] * kDegToRad;
+    }
+    pimpl_->sendCommandAndWait();
+}
+
+void Spark2::moveEEPoint(const Pose& arm_ee, int v, float t){
+    pimpl_->ensureRobotStarted();
+    Position tool_offset = pimpl_->configurator_->getToolOffset();
+    Pose tool_pose = pimpl_->kinematics_->eeToToolPose(arm_ee, tool_offset);
+    moveToolPoint(tool_pose, v, t);
+}
+
+void Spark2::moveEEPointPath(const Path<Pose>& arm_ee, Path<int> v, Path<float> t){
+    pimpl_->ensureRobotStarted();
+    pimpl_->validatePathSize("moveEEPointPath", arm_ee, v, t);
+    Path<Pose> tool_poses;
+    tool_poses.reserve(arm_ee.size());
+    Position tool_offset = pimpl_->configurator_->getToolOffset();
+    for (const auto& ee : arm_ee){
+        tool_poses.push_back(pimpl_->kinematics_->eeToToolPose(ee, tool_offset));
+    }
+    moveToolPointPath(tool_poses, std::move(v), std::move(t));
+}
+
+void Spark2::moveEELine(const Pose& arm_ee, int v, float t){
+    pimpl_->ensureRobotStarted();
+    Position tool_offset = pimpl_->configurator_->getToolOffset();
+    Pose tool_pose = pimpl_->kinematics_->eeToToolPose(arm_ee, tool_offset);
+    moveToolLine(tool_pose, v, t);
+}
+
+void Spark2::moveEELinePath(const Path<Pose>& arm_ee, Path<int> v, Path<float> t){
+    pimpl_->ensureRobotStarted();
+    pimpl_->validatePathSize("moveEELinePath", arm_ee, v, t);
+    Path<Pose> tool_poses;
+    tool_poses.reserve(arm_ee.size());
+    Position tool_offset = pimpl_->configurator_->getToolOffset();
+    for (const auto& ee : arm_ee){
+        tool_poses.push_back(pimpl_->kinematics_->eeToToolPose(ee, tool_offset));
+    }
+    moveToolLinePath(tool_poses, std::move(v), std::move(t));
+}
+
+void Spark2::moveToolPoint(const Pose& arm_tool, int v, float t){
+    pimpl_->ensureRobotStarted();
+    pimpl_->applySinglePointArmMode(
+        ControlStrategy::kCartesian,
+        ControlType::kPosition,
+        pimpl_->actuator_mode_under_position_control_,
+        /*reset_interpolation=*/false,
+        /*reset_control_mem=*/true);
+
+    pimpl_->cmd_req_.payload.target_count = 1;
+    pimpl_->cmd_req_.payload.enable_jog = 0;
+    auto& target = pimpl_->cmd_req_.payload.target[0];
+    target.interpolation_t = (t > 0.f) ? t : pimpl_->default_acc_t_;
+    target.interpolation_speed_ratio = std::clamp(v / 100.0f, 0.0f, 1.0f);
+    fillCartesianFromPose(arm_tool, target.arm_tool_cartesian[0]);
+    pimpl_->sendCommandAndWait();
+}
+
+void Spark2::moveToolPointPath(const Path<Pose>& arm_tool, Path<int> v, Path<float> t){
+    pimpl_->ensureRobotStarted();
+    pimpl_->validatePathSize("moveToolPointPath", arm_tool, v, t);
+    pimpl_->applyPathArmMode(
+        ControlStrategy::kCartesian,
+        ControlType::kPosition,
+        pimpl_->actuator_mode_under_position_control_);
+
+    const int count = static_cast<int>(arm_tool.size());
+    pimpl_->cmd_req_.payload.target_count = static_cast<uint8_t>(count);
+    pimpl_->cmd_req_.payload.enable_jog = 0;
+    for (int i = 0; i < count; i++){
+        fillCartesianFromPose(arm_tool[i], pimpl_->cmd_req_.payload.target[i].arm_tool_cartesian[0]);
+    }
+    pimpl_->fillPathTiming(count, v, t);
+    pimpl_->sendCommandAndWait();
+}
+
+void Spark2::moveToolLine(const Pose& arm_tool, int v, float t){
+    pimpl_->ensureRobotStarted();
+    pimpl_->applySinglePointArmMode(
+        ControlStrategy::kCartesianLine,
+        ControlType::kPosition,
+        pimpl_->actuator_mode_under_position_control_,
+        /*reset_interpolation=*/false,
+        /*reset_control_mem=*/true);
+
+    pimpl_->cmd_req_.payload.target_count = 1;
+    pimpl_->cmd_req_.payload.enable_jog = 0;
+    auto& target = pimpl_->cmd_req_.payload.target[0];
+    target.interpolation_t = (t > 0.f) ? t : pimpl_->default_acc_t_;
+    target.interpolation_speed_ratio = std::clamp(v / 100.0f, 0.0f, 1.0f);
+    fillCartesianFromPose(arm_tool, target.arm_tool_cartesian[0]);
+    pimpl_->sendCommandAndWait();
+}
+
+void Spark2::moveToolLinePath(const Path<Pose>& arm_tool, Path<int> v, Path<float> t){
+    pimpl_->ensureRobotStarted();
+    pimpl_->validatePathSize("moveToolLinePath", arm_tool, v, t);
+    pimpl_->applyPathArmMode(
+        ControlStrategy::kCartesianLine,
+        ControlType::kPosition,
+        pimpl_->actuator_mode_under_position_control_);
+
+    const int count = static_cast<int>(arm_tool.size());
+    pimpl_->cmd_req_.payload.target_count = static_cast<uint8_t>(count);
+    pimpl_->cmd_req_.payload.enable_jog = 0;
+    for (int i = 0; i < count; i++){
+        fillCartesianFromPose(arm_tool[i], pimpl_->cmd_req_.payload.target[i].arm_tool_cartesian[0]);
+    }
+    pimpl_->fillPathTiming(count, v, t);
+    pimpl_->sendCommandAndWait();
+}
+
+void Spark2::goHome(int v, float t){
+    JointState6f home_pos{};
+    movePos(home_pos, v, t);
+}
+
+void Spark2::moveGripperPos(const JointState1f& pos, int /*v*/, float /*t*/){
+    pimpl_->ensureRobotStarted();
+    pimpl_->cmd_req_.payload.target_count = 1;
+    pimpl_->cmd_req_.payload.enable_jog = 0;
+    auto& target = pimpl_->cmd_req_.payload.target[0];
+    // Keep current arm joints while updating gripper.
+    auto state = pimpl_->snapshotState();
+    const int arm_i = 0;
+    for (int j = 0; j < pimpl_->arm_joint_size_[arm_i]; j++){
+        target.arm_joint[arm_i][j] = state->payload.arm[arm_i].position[j];
+    }
+    for (int gri_i = 0; gri_i < pimpl_->gripper_size_; gri_i++){
+        for (int j = 0; j < pimpl_->gripper_joint_size_[gri_i]; j++){
+            target.gripper_joint[gri_i][j] = pos[j];
         }
+    }
+    pimpl_->sendCommandAndWait();
+}
 
-        if (v.size() == arm_pos.size()){
-            for (int i=0; i<pimpl_->panel_command_->ArmWaypointSize; i++){
-                pimpl_->panel_command_->ArmWaypointInterpolationSpeedRatio[i] = std::clamp(v[i] / 100.0f, 0.0f, 1.0f);
-            }
+void Spark2::startTeach(){
+    pimpl_->ensureRobotStarted();
+    // kRecord enables gravity-compensation behavior and RT-side trajectory recording.
+    pimpl_->applySinglePointArmMode(
+        ControlStrategy::kRecord,
+        ControlType::kTorque,
+        ControlType::kTorque);
+    pimpl_->fillHoldJointCommand();
+    pimpl_->sendCommandAndWait();
+}
+
+void Spark2::stopTeach(){
+    pimpl_->ensureRobotStarted();
+    pimpl_->applySinglePointArmMode(
+        ControlStrategy::kJoint,
+        ControlType::kPosition,
+        pimpl_->actuator_mode_under_position_control_);
+    pimpl_->fillHoldJointCommand();
+    pimpl_->sendCommandAndWait();
+}
+
+void Spark2::startPlayback(){
+    pimpl_->ensureRobotStarted();
+    pimpl_->applySinglePointArmMode(
+        ControlStrategy::kPlayback,
+        ControlType::kPosition,
+        pimpl_->actuator_mode_under_position_control_,
+        /*reset_interpolation=*/false,
+        /*reset_control_mem=*/false,
+        PlaybackState::kStart);
+    pimpl_->fillHoldJointCommand();
+    pimpl_->cmd_req_.payload.target[0].interpolation_speed_ratio = 0.2f;
+    pimpl_->sendCommandAndWait();
+}
+
+void Spark2::stopPlayback(){
+    pimpl_->ensureRobotStarted();
+    pimpl_->applySinglePointArmMode(
+        ControlStrategy::kPlayback,
+        ControlType::kPosition,
+        pimpl_->actuator_mode_under_position_control_,
+        false, false, PlaybackState::kStop);
+    pimpl_->fillHoldJointCommand();
+    pimpl_->sendCommandAndWait();
+}
+
+void Spark2::resetPlayback(){
+    pimpl_->ensureRobotStarted();
+    pimpl_->applySinglePointArmMode(
+        ControlStrategy::kPlayback,
+        ControlType::kPosition,
+        pimpl_->actuator_mode_under_position_control_,
+        false, false, PlaybackState::kReset);
+    pimpl_->fillHoldJointCommand();
+    pimpl_->sendCommandAndWait();
+}
+
+RobotJointStatef Spark2::getPos() const{
+    pimpl_->ensureRobotStarted();
+    auto state = pimpl_->snapshotState();
+    RobotJointStatef out{};
+    const int arm_i = 0;
+    for (int i = 0; i < pimpl_->arm_joint_size_[arm_i]; i++){
+        out.arm[i] = state->payload.arm[arm_i].position[i] * kRadToDeg;
+    }
+    if (pimpl_->gripper_size_ > 0){
+        for (int i = 0; i < pimpl_->gripper_joint_size_[0]; i++){
+            out.gripper[i] = state->payload.gripper[0].position[i];
         }
-
-        pimpl_->udpSendAndAckTask(); 
     }
+    return out;
+}
 
-    void Spark2::moveVel(const JointState6f& arm_vel, int a, float t){
-        pimpl_->ensureRobotStarted();
-        pimpl_->panel_command_->motion_type = MotionControl::kJoint;
-        pimpl_->panel_command_->arm_target_mode = PanelTargetMode::kSinglePoint;
-        pimpl_->panel_command_->target_type = ControlType::kVelocity;
-        pimpl_->panel_command_->actuator_mode = ControlType::kVelocity;
-        pimpl_->panel_command_->InterpolationAccTime = t;
-        pimpl_->panel_command_->interpolation_speed_ratio = std::clamp(a / 100.0f, 0.0f, 1.0f);
+RobotJointStatef Spark2::getVel() const{
+    pimpl_->ensureRobotStarted();
+    auto state = pimpl_->snapshotState();
+    RobotJointStatef out{};
+    const int arm_i = 0;
+    for (int i = 0; i < pimpl_->arm_joint_size_[arm_i]; i++){
+        out.arm[i] = state->payload.arm[arm_i].velocity[i] * kRadToDeg;
+    }
+    return out;
+}
 
-        int arm_i = 0;
-        for (int j=0; j<pimpl_->arm_joint_size_[arm_i]; j++){
-            pimpl_->panel_command_->JointCmdDeg[arm_i][j] = arm_vel[j];
+RobotJointStatef Spark2::getTor() const{
+    pimpl_->ensureRobotStarted();
+    auto state = pimpl_->snapshotState();
+    RobotJointStatef out{};
+    const int arm_i = 0;
+    for (int i = 0; i < pimpl_->arm_joint_size_[arm_i]; i++){
+        out.arm[i] = state->payload.arm[arm_i].torque[i];
+    }
+    return out;
+}
+
+Pose Spark2::getEEPose() const{
+    pimpl_->ensureRobotStarted();
+    auto state = pimpl_->snapshotState();
+    const int arm_i = 0;
+    const int ee_idx = pimpl_->arm_joint_size_[arm_i] - 1;
+    return poseFromCartesian(state->payload.arm[arm_i].joint_poses[ee_idx]);
+}
+
+Pose Spark2::getToolPose() const{
+    pimpl_->ensureRobotStarted();
+    auto state = pimpl_->snapshotState();
+    return poseFromCartesian(state->payload.arm[0].tool_pose);
+}
+
+JointState6b Spark2::isArmJointEnabled() const{
+    pimpl_->ensureRobotStarted();
+    JointState6b enabled{};
+    const int arm_i = 0;
+    if (pimpl_->have_config_res_){
+        for (int j = 0; j < pimpl_->arm_joint_size_[arm_i]; j++){
+            enabled[j] = pimpl_->last_config_res_.payload.arm[arm_i].enabled_joint[j] != 0;
         }
-
-        pimpl_->udpSendAndAckTask(); 
-    }
-
-    void Spark2::moveEEPoint(const Pose& arm_ee, int v, float t){
-        pimpl_->ensureRobotStarted();
-        Position tool_offset = pimpl_->configurator_->getToolOffset();
-        Pose tool_pose = pimpl_->kinematics_->eeToToolPose(arm_ee, tool_offset);
-        moveToolPoint(tool_pose, v, t);
-    }
-
-    void Spark2::moveEEPointPath(const Path<Pose>& arm_ee, Path<int> v, Path<float> t){
-        pimpl_->ensureRobotStarted();
-        pimpl_->validatePathSize("moveEEPointPath", arm_ee, v, t);
-
-        Path<Pose> tool_pose;
-        Position tool_offset = pimpl_->configurator_->getToolOffset();
-        for (int i=0; i<arm_ee.size(); i++){
-            tool_pose[i] = pimpl_->kinematics_->eeToToolPose(arm_ee[i], tool_offset);
+    } else {
+        for (int j = 0; j < pimpl_->arm_joint_size_[arm_i]; j++){
+            enabled[j] = pimpl_->config_req_.payload.arm[arm_i].enable_joint[j] != 0;
         }
-        moveToolPointPath(tool_pose, v, t);
     }
+    return enabled;
+}
 
-    void Spark2::moveEELine(const Pose& arm_ee, int v, float t){
-        pimpl_->ensureRobotStarted();
-        Position tool_offset = pimpl_->configurator_->getToolOffset();
-        Pose tool_pose = pimpl_->kinematics_->eeToToolPose(arm_ee, tool_offset);
-        moveToolLine(tool_pose, v, t);
+SystemStatus Spark2::getStatus() const{
+    pimpl_->ensureRobotStarted();
+    auto state = pimpl_->snapshotState();
+    SystemStatus status{};
+    status.robot_state = mapSystemState(state->payload.system_state);
+    status.plan_result = static_cast<PlanResult>(state->payload.plan_result);
+    status.robot_diagnostic_flags = state->payload.system_diagnostic_flags;
+    const int arm_i = 0;
+    for (int j = 0; j < pimpl_->arm_joint_size_[arm_i]; j++){
+        status.arm_joint_diagnostic_flags[j] = state->payload.arm[arm_i].diagnostic_flags[j];
     }
-
-    void Spark2::moveEELinePath(const Path<Pose>& arm_ee, Path<int> v, Path<float> t){
-        pimpl_->ensureRobotStarted();
-        pimpl_->validatePathSize("moveEELinePath", arm_ee, v, t);
-
-        Path<Pose> tool_pose;
-        Position tool_offset = pimpl_->configurator_->getToolOffset();
-        for (int i=0; i<arm_ee.size(); i++){
-            tool_pose[i] = pimpl_->kinematics_->eeToToolPose(arm_ee[i], tool_offset);
+    if (pimpl_->gripper_size_ > 0){
+        for (int j = 0; j < pimpl_->gripper_joint_size_[0]; j++){
+            status.gripper_joint_diagnostic_flags[j] = state->payload.gripper[0].diagnostic_flags[j];
         }
-        moveToolLinePath(tool_pose, v, t);
     }
+    return status;
+}
 
-    void Spark2::moveToolPoint(const Pose& arm_tool, int v, float t){
-        pimpl_->ensureRobotStarted();
-        pimpl_->panel_command_->motion_type = MotionControl::kTask;
-        pimpl_->panel_command_->task_orien_type = OrientControl::kEnd;
-        pimpl_->panel_command_->arm_target_mode = PanelTargetMode::kSinglePoint;
-        pimpl_->switchTargetType(ControlType::kPosition, pimpl_->actuator_mode_under_position_control_);
-        pimpl_->panel_command_->reset_control_mem = true;
-        pimpl_->panel_command_->InterpolationAccTime = t;
-        pimpl_->panel_command_->interpolation_speed_ratio = std::clamp(v / 100.0f, 0.0f, 1.0f);
+void Spark2::printStatus(const SystemStatus& status) const{
+    std::cout << "Robot State: " << robotStateToString(status.robot_state) << std::endl;
+    std::cout << "Plan Result: " << planResultToString(status.plan_result) << std::endl;
+    std::cout << "Robot Diagnostic Flags: ";
+    robot::platform::print_diagnostic_flags(status.robot_diagnostic_flags);
 
-        int arm_i = 0;
-        Pose current_pose = getToolPose();
-        EulerAngle current_euler = pimpl_->kinematics_->quaternionToEuler(current_pose.orientation);
-        EulerAngle target_euler = pimpl_->kinematics_->quaternionToEuler(arm_tool.orientation);
-        pimpl_->panel_command_->TaskCmdDeg[arm_i][0] = arm_tool.position.x - current_pose.position.x;
-        pimpl_->panel_command_->TaskCmdDeg[arm_i][1] = arm_tool.position.y - current_pose.position.y;
-        pimpl_->panel_command_->TaskCmdDeg[arm_i][2] = arm_tool.position.z - current_pose.position.z;
-        pimpl_->panel_command_->TaskCmdDeg[arm_i][3] = target_euler.roll - current_euler.roll;
-        pimpl_->panel_command_->TaskCmdDeg[arm_i][4] = target_euler.pitch - current_euler.pitch;
-        pimpl_->panel_command_->TaskCmdDeg[arm_i][5] = target_euler.yaw - current_euler.yaw;
-        
-        pimpl_->udpSendAndAckTask(); 
-    }
-
-    void Spark2::moveToolPointPath(const Path<Pose>& arm_tool, Path<int> v, Path<float> t){
-        pimpl_->ensureRobotStarted();
-        pimpl_->validatePathSize("moveToolPointPath", arm_tool, v, t);
-
-        pimpl_->panel_command_->motion_type = MotionControl::kTask;
-        pimpl_->panel_command_->task_orien_type = OrientControl::kEnd;
-        pimpl_->panel_command_->arm_target_mode = PanelTargetMode::kWaypoint;
-        pimpl_->switchTargetType(ControlType::kPosition, pimpl_->actuator_mode_under_position_control_);
-        pimpl_->panel_command_->reset_control_mem = true;
-        pimpl_->panel_command_->reset_interpolation = true;
-
-        int arm_i = 0;
-        Pose current_pose = getToolPose();
-        EulerAngle current_euler = pimpl_->kinematics_->quaternionToEuler(current_pose.orientation);
-        pimpl_->panel_command_->ArmWaypointSize = arm_tool.size();
-        for (int i=0; i<pimpl_->panel_command_->ArmWaypointSize; i++){
-            EulerAngle target_euler = pimpl_->kinematics_->quaternionToEuler(arm_tool[i].orientation);
-            pimpl_->panel_command_->ArmWaypointCmdDeg[i][arm_i][0] = arm_tool[i].position.x - current_pose.position.x;
-            pimpl_->panel_command_->ArmWaypointCmdDeg[i][arm_i][1] = arm_tool[i].position.y - current_pose.position.y;
-            pimpl_->panel_command_->ArmWaypointCmdDeg[i][arm_i][2] = arm_tool[i].position.z - current_pose.position.z;
-            pimpl_->panel_command_->ArmWaypointCmdDeg[i][arm_i][3] = target_euler.roll - current_euler.roll;
-            pimpl_->panel_command_->ArmWaypointCmdDeg[i][arm_i][4] = target_euler.pitch - current_euler.pitch;
-            pimpl_->panel_command_->ArmWaypointCmdDeg[i][arm_i][5] = target_euler.yaw - current_euler.yaw;
+    std::cout << "Arm Joint Diagnostic Flags: ";
+    bool has_flags = false;
+    for (int j = 0; j < pimpl_->arm_joint_size_[0]; j++){
+        if (status.arm_joint_diagnostic_flags[j] != DiagnosticFlags::kNone){
+            std::cout << "Joint " << j << ": ";
+            robot::platform::print_diagnostic_flags(status.arm_joint_diagnostic_flags[j]);
+            has_flags = true;
         }
-        
-        if (t.size() == arm_tool.size()){
-            for (int i=0; i<pimpl_->panel_command_->ArmWaypointSize; i++){
-                pimpl_->panel_command_->ArmWaypointInterpolationTime[i] = t[i];
-            }
-        }
-
-        if (v.size() == arm_tool.size()){
-            for (int i=0; i<pimpl_->panel_command_->ArmWaypointSize; i++){
-                pimpl_->panel_command_->ArmWaypointInterpolationSpeedRatio[i] = std::clamp(v[i] / 100.0f, 0.0f, 1.0f);
-            }
-        }
-
-        pimpl_->udpSendAndAckTask(); 
+    }
+    if (!has_flags){
+        std::cout << "None\n";
     }
 
-    void Spark2::moveToolLine(const Pose& arm_tool, int v, float t){
-        pimpl_->ensureRobotStarted();
-        pimpl_->panel_command_->motion_type = MotionControl::kTaskLine;
-        pimpl_->panel_command_->task_orien_type = OrientControl::kEnd;
-        pimpl_->panel_command_->arm_target_mode = PanelTargetMode::kSinglePoint;
-        pimpl_->switchTargetType(ControlType::kPosition, pimpl_->actuator_mode_under_position_control_);
-        pimpl_->panel_command_->reset_control_mem = true;
-        pimpl_->panel_command_->InterpolationAccTime = t;
-        pimpl_->panel_command_->interpolation_speed_ratio = std::clamp(v / 100.0f, 0.0f, 1.0f);
-
-        int arm_i = 0;
-        Pose current_pose = getToolPose();
-        EulerAngle current_euler = pimpl_->kinematics_->quaternionToEuler(current_pose.orientation);
-        EulerAngle target_euler = pimpl_->kinematics_->quaternionToEuler(arm_tool.orientation);
-        pimpl_->panel_command_->TaskCmdDeg[arm_i][0] = arm_tool.position.x - current_pose.position.x;
-        pimpl_->panel_command_->TaskCmdDeg[arm_i][1] = arm_tool.position.y - current_pose.position.y;
-        pimpl_->panel_command_->TaskCmdDeg[arm_i][2] = arm_tool.position.z - current_pose.position.z;
-        pimpl_->panel_command_->TaskCmdDeg[arm_i][3] = target_euler.roll - current_euler.roll;
-        pimpl_->panel_command_->TaskCmdDeg[arm_i][4] = target_euler.pitch - current_euler.pitch;
-        pimpl_->panel_command_->TaskCmdDeg[arm_i][5] = target_euler.yaw - current_euler.yaw;
-        pimpl_->udpSendAndAckTask(); 
-    }
-
-    void Spark2::moveToolLinePath(const Path<Pose>& arm_tool, Path<int> v, Path<float> t){
-        pimpl_->ensureRobotStarted();
-        pimpl_->validatePathSize("moveToolLinePath", arm_tool, v, t);
-
-        pimpl_->panel_command_->motion_type = MotionControl::kTaskLine;
-        pimpl_->panel_command_->task_orien_type = OrientControl::kEnd;
-        pimpl_->panel_command_->arm_target_mode = PanelTargetMode::kWaypoint;
-        pimpl_->switchTargetType(ControlType::kPosition, pimpl_->actuator_mode_under_position_control_);
-        pimpl_->panel_command_->reset_control_mem = true;
-        pimpl_->panel_command_->reset_interpolation = true;
-        
-        int arm_i = 0;
-        Pose current_pose = getToolPose();
-        EulerAngle current_euler = pimpl_->kinematics_->quaternionToEuler(current_pose.orientation);
-        pimpl_->panel_command_->ArmWaypointSize = arm_tool.size();
-        for (int i=0; i<pimpl_->panel_command_->ArmWaypointSize; i++){
-            EulerAngle target_euler = pimpl_->kinematics_->quaternionToEuler(arm_tool[i].orientation);
-            pimpl_->panel_command_->ArmWaypointCmdDeg[i][arm_i][0] = arm_tool[i].position.x - current_pose.position.x;
-            pimpl_->panel_command_->ArmWaypointCmdDeg[i][arm_i][1] = arm_tool[i].position.y - current_pose.position.y;
-            pimpl_->panel_command_->ArmWaypointCmdDeg[i][arm_i][2] = arm_tool[i].position.z - current_pose.position.z;
-            pimpl_->panel_command_->ArmWaypointCmdDeg[i][arm_i][3] = target_euler.roll - current_euler.roll;
-            pimpl_->panel_command_->ArmWaypointCmdDeg[i][arm_i][4] = target_euler.pitch - current_euler.pitch;
-            pimpl_->panel_command_->ArmWaypointCmdDeg[i][arm_i][5] = target_euler.yaw - current_euler.yaw;
-        }
-
-        if (t.size() == arm_tool.size()){
-            for (int i=0; i<pimpl_->panel_command_->ArmWaypointSize; i++){
-                pimpl_->panel_command_->ArmWaypointInterpolationTime[i] = t[i];
-            }
-        }
-
-        if (v.size() == arm_tool.size()){
-            for (int i=0; i<pimpl_->panel_command_->ArmWaypointSize; i++){
-                pimpl_->panel_command_->ArmWaypointInterpolationSpeedRatio[i] = std::clamp(v[i] / 100.0f, 0.0f, 1.0f);
-            }
-        }
-
-        pimpl_->udpSendAndAckTask(); 
-    }
-
-    void Spark2::goHome(int v, float t){
-        pimpl_->ensureRobotStarted();
-        JointState6f home_pos;
-        
-        int arm_i = 0;
-        for (int j=0; j<pimpl_->arm_joint_size_[arm_i]; j++){
-            home_pos[j] = 0;
-        }
-        movePos(home_pos, v, t);
-    }
-
-    void Spark2::moveGripperPos(const JointState1f& pos, int v, float t){
-        pimpl_->ensureRobotStarted();
-        for (int i=0; i<pimpl_->gripper_size_; i++){
-            for (int j=0; j<pimpl_->gripper_joint_size_[i]; j++){
-                pimpl_->panel_command_->GripperJointCmd[i][j] = pos[j];
-            }
-        }
-        pimpl_->udpSendAndAckTask(); 
-    }
-
-    // Teach Mode
-    void Spark2::startTeach(){
-        pimpl_->ensureRobotStarted();
-        pimpl_->panel_command_->motion_type = MotionControl::kControlAlgorithm;
-        pimpl_->panel_command_->control_algorithm = ControlAlgorithm::kGravity;
-        pimpl_->switchTargetType(ControlType::kTorque, ControlType::kTorque);
-        pimpl_->panel_command_->enable_recording = true;
-        pimpl_->udpSendAndAckTask(); 
-    }
-
-    void Spark2::stopTeach(){
-        pimpl_->ensureRobotStarted();
-        pimpl_->panel_command_->motion_type = MotionControl::kJoint;
-        pimpl_->panel_command_->control_algorithm = ControlAlgorithm::kNone;
-        pimpl_->switchTargetType(ControlType::kPosition, pimpl_->actuator_mode_under_position_control_);
-        pimpl_->panel_command_->enable_recording = false;
-        pimpl_->udpSendAndAckTask(); 
-    }
-
-    // Playback Mode
-    void Spark2::startPlayback(){
-        pimpl_->ensureRobotStarted();
-        pimpl_->panel_command_->motion_type = MotionControl::kPlayback;
-        pimpl_->switchTargetType(ControlType::kPosition, pimpl_->actuator_mode_under_position_control_);
-        pimpl_->panel_command_->playback_cmd = PlaybackState::kStart;
-        pimpl_->panel_command_->InterpolationAccTime = 0;
-        pimpl_->panel_command_->interpolation_speed_ratio = 0.2f;
-        pimpl_->udpSendAndAckTask(); 
-    }
-
-    void Spark2::stopPlayback(){
-        pimpl_->ensureRobotStarted();
-        pimpl_->panel_command_->motion_type = MotionControl::kPlayback;
-        pimpl_->switchTargetType(ControlType::kPosition, pimpl_->actuator_mode_under_position_control_);
-        pimpl_->panel_command_->playback_cmd = PlaybackState::kStop;
-        pimpl_->panel_command_->InterpolationAccTime = 0;
-        pimpl_->panel_command_->interpolation_speed_ratio = 0.2f;
-        pimpl_->udpSendAndAckTask();
-    }
-
-    void Spark2::resetPlayback(){
-        pimpl_->ensureRobotStarted();
-        pimpl_->panel_command_->motion_type = MotionControl::kPlayback;
-        pimpl_->switchTargetType(ControlType::kPosition, pimpl_->actuator_mode_under_position_control_);
-        pimpl_->panel_command_->playback_cmd = PlaybackState::kReset;
-        pimpl_->panel_command_->InterpolationAccTime = 0;
-        pimpl_->panel_command_->interpolation_speed_ratio = 0.2f;
-        pimpl_->udpSendAndAckTask();
-    }
-
-    // Feedback
-    RobotJointStatef Spark2::getPos() const{
-        pimpl_->ensureRobotStarted();
-        int arm_i = 0;
-        RobotJointStatef state;
-
-        JointState6f joint_state;
-        for (int i=0; i<pimpl_->arm_joint_size_[arm_i]; i++){
-            joint_state[i] = pimpl_->planner_state_->JointPos[arm_i][i];
-        }
-        state.arm = joint_state;
-
-        JointState1f gripper_state{0};
-        if (pimpl_->gripper_size_ > 0){
-            int gripper_i = 0;
-            for (int i=0; i<pimpl_->gripper_joint_size_[gripper_i]; i++){
-                gripper_state[i] = pimpl_->planner_state_->GripperJointPos[gripper_i][i];
-            }
-        }
-        state.gripper = gripper_state;
-        return state;
-    }
-
-    RobotJointStatef Spark2::getVel() const{
-        pimpl_->ensureRobotStarted();
-        int arm_i = 0;
-        RobotJointStatef state;
-
-        JointState6f joint_state;
-        for (int i=0; i<pimpl_->arm_joint_size_[arm_i]; i++){
-            joint_state[i] = pimpl_->planner_state_->JointVel[arm_i][i];
-        }
-        state.arm = joint_state;
-
-        JointState1f gripper_state{0};
-        if (pimpl_->gripper_size_ > 0){
-            int gripper_i = 0;
-            for (int i=0; i<pimpl_->gripper_joint_size_[gripper_i]; i++){
-                gripper_state[i] = pimpl_->planner_state_->GripperJointPos[gripper_i][i];
-            }
-        }
-        state.gripper = gripper_state;
-        return state;
-    }
-
-    RobotJointStatef Spark2::getTor() const{
-        pimpl_->ensureRobotStarted();
-        int arm_i = 0;
-        RobotJointStatef state;
-
-        JointState6f joint_state;
-        for (int i=0; i<pimpl_->arm_joint_size_[arm_i]; i++){
-            joint_state[i] = pimpl_->planner_state_->JointTor[arm_i][i];
-        }
-        state.arm = joint_state;
-
-        JointState1f gripper_state{0};
-        if (pimpl_->gripper_size_ > 0){
-            int gripper_i = 0;
-            for (int i=0; i<pimpl_->gripper_joint_size_[gripper_i]; i++){
-                gripper_state[i] = pimpl_->planner_state_->GripperJointPos[gripper_i][i];
-            }
-        }
-        state.gripper = gripper_state;
-        return state;
-    }
-
-    Pose Spark2::getEEPose() const{
-        pimpl_->ensureRobotStarted();
-        int arm_i = 0;
-        Pose pose;
-        pose.position.x = pimpl_->planner_state_->EEPose[arm_i][0];
-        pose.position.y = pimpl_->planner_state_->EEPose[arm_i][1];
-        pose.position.z = pimpl_->planner_state_->EEPose[arm_i][2];
-        pose.orientation.w = pimpl_->planner_state_->EEPose[arm_i][3];
-        pose.orientation.x = pimpl_->planner_state_->EEPose[arm_i][4];
-        pose.orientation.y = pimpl_->planner_state_->EEPose[arm_i][5];
-        pose.orientation.z = pimpl_->planner_state_->EEPose[arm_i][6];
-        return pose;
-    }
-
-    Pose Spark2::getToolPose() const{
-        pimpl_->ensureRobotStarted();
-        int arm_i = 0;
-        Pose pose;
-        pose.position.x = pimpl_->planner_state_->ToolPose[arm_i][0];
-        pose.position.y = pimpl_->planner_state_->ToolPose[arm_i][1];
-        pose.position.z = pimpl_->planner_state_->ToolPose[arm_i][2];
-        pose.orientation.w = pimpl_->planner_state_->ToolPose[arm_i][3];
-        pose.orientation.x = pimpl_->planner_state_->ToolPose[arm_i][4];
-        pose.orientation.y = pimpl_->planner_state_->ToolPose[arm_i][5];
-        pose.orientation.z = pimpl_->planner_state_->ToolPose[arm_i][6];
-        return pose;
-    }
-
-    // Status
-    JointState6b Spark2::isArmJointEnabled() const{
-        JointState6b enabled;
-        int arm_i = 0;
-        for (int j=0; j<pimpl_->arm_joint_size_[arm_i]; j++){
-            enabled[j] = pimpl_->planner_state_->enabled_joint[arm_i][j];
-        }
-        return enabled;
-    }
-    
-    SystemStatus Spark2::getStatus() const{
-        SystemStatus status;
-        int arm_i = 0;
-        status.robot_state =  static_cast<spark2::RobotState>(pimpl_->planner_state_->system_state);
-        status.plan_result = static_cast<spark2::PlanResult>(pimpl_->planner_state_->plan_result);
-        status.robot_diagnostic_flags = pimpl_->planner_state_->system_diagnostic_flags;
-        for (int j=0; j<pimpl_->arm_joint_size_[arm_i]; j++){
-            status.arm_joint_diagnostic_flags[j] = pimpl_->planner_state_->arm_joint_diagnostic_flags[arm_i][j];
-        }
-        std::cout <<"\n";
-        if (pimpl_->gripper_size_ > 0){
-            int gripper_i = 0;
-            for (int j=0; j<pimpl_->gripper_joint_size_[gripper_i]; j++){
-                status.gripper_joint_diagnostic_flags[j] = spark2::DiagnosticFlags::kNone;
+    if (pimpl_->gripper_size_ > 0){
+        std::cout << "Gripper Joint Diagnostic Flags: ";
+        has_flags = false;
+        for (int j = 0; j < pimpl_->gripper_joint_size_[0]; j++){
+            if (status.gripper_joint_diagnostic_flags[j] != DiagnosticFlags::kNone){
+                std::cout << "Joint " << j << ": ";
+                robot::platform::print_diagnostic_flags(status.gripper_joint_diagnostic_flags[j]);
+                has_flags = true;
             }
         }
-        return status;
-    }
-
-    void Spark2::printStatus(const SystemStatus& status) const{
-        int arm_i = 0;
-        std::cout << "Robot State: " << enumToString(status.robot_state) << std::endl;
-        std::cout << "Plan Result: " << enumToString(status.plan_result) << std::endl;
-        std::cout << "Robot Diagnostic Flags: ";
-        print_diagnostic_flags(status.robot_diagnostic_flags);
-
-        //Print
-        std::cout << "Arm Joint Diagnostic Flags: ";
-        bool has_diagnostic_flags = false;
-        for (int j=0; j<pimpl_->arm_joint_size_[arm_i]; j++){
-            if (status.arm_joint_diagnostic_flags[j] != DiagnosticFlags::kNone){
-                std::cout << "Joint " << j <<": ";
-                print_diagnostic_flags(status.arm_joint_diagnostic_flags[j]);
-                has_diagnostic_flags = true;
-            }
-        }
-        if (!has_diagnostic_flags){
+        if (!has_flags){
             std::cout << "None\n";
         }
-
-        //Print gripper joint diagnostic flags
-        if (pimpl_->gripper_size_ > 0){
-            std::cout << "Gripper Joint Diagnostic Flags: ";
-            has_diagnostic_flags = false;
-            int gripper_i = 0;
-            for (int j=0; j<pimpl_->gripper_joint_size_[gripper_i]; j++){
-                if (status.gripper_joint_diagnostic_flags[j] != DiagnosticFlags::kNone){
-                    std::cout << "Joint " << j <<": ";
-                    print_diagnostic_flags(status.gripper_joint_diagnostic_flags[j]);
-                    has_diagnostic_flags = true;
-                }
-            }
-            if (!has_diagnostic_flags){
-                std::cout << "None\n";
-            }
-        }
-
     }
-
-    Configurator& Spark2::getConfigurator(){
-        return *pimpl_->configurator_;
-    }
-
-    Kinematics& Spark2::getKinematics(){
-        return *pimpl_->kinematics_;
-    }
-
-
-
 }
+
+Configurator& Spark2::getConfigurator(){
+    return *pimpl_->configurator_;
+}
+
+Kinematics& Spark2::getKinematics(){
+    return *pimpl_->kinematics_;
+}
+
+}  // namespace spark2

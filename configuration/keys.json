@@ -1,0 +1,34 @@
+{
+  "client_registry": {
+    "0": {
+      "name": "Server Multicast",
+      "priority": "kHighestPriority",
+      "hmac_key": "fe7c38817b6c5319509be5f923b013e2"
+    },
+    "10001": {
+      "name": "Physical Button",
+      "priority": "kPhysicalButton",
+      "hmac_key": "524e76d6e25d086bae8d97949595fd22"
+    },
+    "10002": {
+      "name": "Local GUI",
+      "priority": "kEmbeddedGUI",
+      "hmac_key": "10cb5276e0935af218bed6e4ae7e8b0d"
+    },
+    "10003": {
+      "name": "Sdk",
+      "priority": "kStandard",
+      "hmac_key": "b4eee28d6d1563b6cef0e9e552d6c8bc"
+    },
+    "10004": {
+      "name": "Web",
+      "priority": "kStandard",
+      "hmac_key": "e58acbfb51596d39085c9c56a1ce9532"
+    },
+    "10005": {
+      "name": "Panel",
+      "priority": "kStandard",
+      "hmac_key": "15e9bca3b22a5c6e2eb313c0893de54d"
+    }
+  }
+}

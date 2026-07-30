@@ -14,8 +14,9 @@ rt_control:
   server_ip: 127.0.0.1  # or auto / discover
   core_request_port: 8881
   monitoring_request_port: 8882
-  multicast_ip: 224.0.0.123
-  multicast_port: 9988
+  telemetry_port: 9988          # unicast SrvState listen port (matches RT telemetry_port)
+  multicast_ip: 224.0.0.123     # kept for SDK auto-discovery probes
+  multicast_port: 9988          # legacy alias of telemetry_port
   hardware_simulation: false
   robotics_library: pinocchio
   client_id: 10003 

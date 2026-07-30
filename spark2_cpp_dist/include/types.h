@@ -108,7 +108,9 @@ namespace spark2{
         constexpr uint64_t kControlStrategyNotAvailable           = 1ULL << 34;
         constexpr uint64_t kWaypointControlStrategyNotAllowed     = 1ULL << 35;
         constexpr uint64_t kWaypointTargetTypeNotAllowed          = 1ULL << 36;
-        constexpr uint64_t kPlaybackControlRequirePositionTarget  = 1ULL << 37;
+        constexpr uint64_t kWaypointSmoothingMethodNotAllowed     = 1ULL << 37;
+        constexpr uint64_t kPlaybackControlRequirePositionTarget  = 1ULL << 38;
+        constexpr uint64_t kPlaybackControlStartPoseNotReachable  = 1ULL << 39;
         constexpr uint64_t kUnknown                               = 1ULL << 63;
     };
 

@@ -3,15 +3,14 @@
 
 Spark2 SDK provides a unified API to control the Spark2 robotic arm: joint-space and Cartesian motion, teach/playback modes, configuration, and kinematics. The repository ships both a **C++20** library and a **Python 3.8+** package. 
 
-End-user distributions are provided under `spark2_cpp_dist/` and `spark2_python_dist/`. Robot configuration is bundled in `configuration/`. The `cpp/` directory contains the source tree and build system exclusively for SDK internal core developers.
+End-user distributions are provided under `spark2_cpp_dist/` and `spark2_python_dist/`. Robot configuration (including `keys.json`) is bundled in `configuration/`.
 
 ## Repository layout
 
 ```text
 spark2_sdk/
 |-- README.md
-|-- configuration/                Bundled robot configuration (URDF, YAML, meshes)
-|-- cpp/                          Source SDK and build system (developers only)
+|-- configuration/                Bundled robot configuration (URDF, YAML, meshes, keys)
 |-- spark2_cpp_dist/              Pre-built C++ distribution (end users)
 |-- spark2_python_dist/           Python distribution (end users)
 ```
